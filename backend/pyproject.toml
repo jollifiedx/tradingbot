@@ -27,7 +27,7 @@ dev = [
 ]
 # Trading deps added when their modules land (kept separate: heavy installs)
 trading = [
-    "webull-openapi-python-sdk",
+    "webull-openapi-python-sdk==2.0.14",
     "pandas>=2.2",
     "pandas-ta>=0.3",
     "vectorbt>=0.26",
@@ -51,6 +51,14 @@ select = ["E", "F", "I", "UP", "B", "SIM", "DTZ"]  # DTZ: naive-datetime bans (U
 strict = true
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
+
+# The Webull SDK ships no py.typed marker and no stubs. Rather than globally
+# relaxing strict mode, we scope the missing-imports allowance to webull.* only.
+# All SDK access is confined to app/core/webull/client.py, which parses the
+# SDK's Any-typed responses into validated Pydantic models at the boundary.
+[[tool.mypy.overrides]]
+module = ["webull.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
