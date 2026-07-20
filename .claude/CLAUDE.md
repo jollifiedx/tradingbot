@@ -65,16 +65,21 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   ruff/mypy-strict/pytest, smoke test. Initial schema: 11 migrations in `supabase/migrations/`
   (audit chain decisions→orders→trades, append-only triggers + SELECT-only RLS, pgvector
   theses, singleton settings born frozen with caps=0).
-- **In progress:** Schema APPROVED by owner 2026-07-19 (docs/decisions.md); architect review
-  of migrations + Webull client wrapper started. Next: Supabase dev project (needs owner's
-  Supabase account — or Docker + Supabase CLI for local) + apply migrations; Pydantic models
-  mirroring schema.
-- **Known issues / debt:** Backend verified locally (Python 3.12.10, venv, pytest/ruff/mypy
-  green). Webull paper credentials in backend/.env (rotated by owner). No Supabase project
-  yet; supabase CLI + Docker not installed. No PRD beyond research files. Safety "never"
-  rules exist only as prompts — must become PreToolUse hooks / permissions.deny before live
-  trading. app_owner table must be populated with Esther's Supabase Auth UID per environment
-  or all RLS denies (fail-closed).
+- **In progress:** Schema applied to Supabase dev project 2026-07-20 (11 migrations via
+  asyncpg with CLI-compatible tracking in supabase_migrations.schema_migrations); 15/15
+  runtime smoke tests passed (append-only triggers, singleton, born-frozen, SECURITY DEFINER
+  history logging, fail-closed app_owner). Webull wrapper reviewed by architect: no blockers,
+  1 DRIFT open (auto_retry=False + credential-log silencing lack regression tests) + NOTE
+  (is_live/env label doesn't gate host routing — order path must not rely on it). Next:
+  wrapper DRIFT tests; Pydantic models mirroring schema; resolve Webull paper endpoint
+  question (SDK ships live hosts only — see broker-integrator memory).
+- **Known issues / debt:** Backend verified locally (Python 3.12.10). Webull paper creds +
+  Supabase keys in backend/.env. supabase CLI + Docker not installed (migrations applied via
+  asyncpg script). No PRD beyond research files. Safety "never" rules exist only as prompts —
+  must become PreToolUse hooks / permissions.deny before live trading. app_owner still empty
+  (needs Esther's Supabase Auth UID once auth-setup creates her user — until then all
+  authenticated RLS denies, fail-closed). Optional hardening awaiting owner OK: unique
+  partial index on orders.previous_order_id (audit-table constraint → owner approval).
 
 ## Agent Instructions
 

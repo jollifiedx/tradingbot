@@ -1,0 +1,1 @@
+- [Recurring drift: safety code without tests](drift_safety_untested.md) — safety-relevant behavior shipped untested; check every diff for it
