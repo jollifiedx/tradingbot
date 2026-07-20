@@ -74,10 +74,18 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   introspection + app_owner check, 401/403/503 fail-closed); GET /settings,/decisions,
   /account + PATCH /settings (freeze/cap write, architect-approved). Money string-typed
   through OpenAPI. 93 tests green, mypy strict clean.
-- **In progress:** Nothing active. Next: frontend can now begin — frontend-engineer runs
-  api-client-regen against the real OpenAPI spec, then first screen (freeze toggle + settings
-  + decision log). GET /positions DEFERRED (no DB source; Invariant 2 — needs worker→DB
-  positions snapshot first).
+  Frontend PWA first screen COMPLETE (68c1ee0): Vite+React+TS+Tailwind, TanStack Query +
+  Zustand + RHF/Zod, Supabase auth (email+password), typed client from OpenAPI (openapi.json
+  committed). Screen: freeze banner, freeze toggle + caps editor (both confirm-gated),
+  decision log, account panel. Money strings end-to-end. Verified: npm run build clean, and
+  boots live (backend uvicorn + vite) — login screen renders, no console errors, /settings
+  401 unauth. NOT yet done: authenticated login→freeze flow (needs owner's password — owner
+  tests). Dev run: backend `uvicorn app.api.main:app --port 8000`; frontend `npm run dev`.
+- **In progress:** Nothing active. Next candidates: (1) owner does live login+freeze test;
+  (2) TOTP 2FA enrollment flow (login is password-only; CLAUDE.md wants mandatory 2FA);
+  (3) worker safety gate + reconciliation (the heart); (4) deploy (Vercel+Railway) to make
+  the dashboard phone-accessible — owner-gated. GET /positions still DEFERRED (needs worker→DB
+  positions snapshot first; Invariant 2).
 - **Known issues / debt:** Pre-live API follow-ups (non-blocking, per architect): add a
   rolled-back live-DB integration test for update_settings (coalesce + history trigger);
   optional float-rejecting validator on money PATCH input; PATCH gate-503 test for symmetry.
