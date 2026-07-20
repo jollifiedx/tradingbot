@@ -56,6 +56,21 @@ current SDK version before relying on any of these — they were true at 2.0.14.
   US_ETF, US_OPTION, US_CRYPTO, ... `OrderStatus`: SUBMITTED, CANCELLED, FAILED,
   FILLED, PARTIAL_FILLED (label is "PARTIAL FILLED" with a space — normalise
   space→underscore when mapping). Query params take the name string.
+- **Account-id discovery methods (read-only).** The wrapper takes `account_id`
+  as input; to *find* it, v1 `trade.account` exposes `get_app_subscriptions()`
+  (docstring: "query the account list and return account information") and the v2
+  object `trade.account_v2` exposes `get_account_list()`. v1 `Account` methods:
+  `get_account_balance(account_id, total_asset_currency)`,
+  `get_account_position(account_id, page_size=10, last_instrument_id=None)`,
+  `get_account_profile`, `get_app_subscriptions`. (No `webull.trade.api` /
+  `webull.trade.api_request` modules exist — real path is
+  `webull.trade.trade.account_info.Account`.)
+- **`ServerException` fields are response-side and safe to log.** It carries
+  `error_code`, `error_msg`, `http_status`, `request_id` (all from the server's
+  reply, no request headers) — unlike the `ClientException`/request-`vars`
+  logging leak. A sandbox path-not-found comes back as `http_status=404`,
+  `error_code='SDK.UnknownServerError'`, empty `error_msg`, with a real
+  `request_id`. See [[webull-paper-endpoint-open-question]] for the sandbox 404.
 - **Timeouts are ApiClient-level.** Constructor args `connect_timeout` +
   `timeout` (read) apply to all calls; per-request `set_read_timeout` /
   `set_connect_timeout` also exist but the SDK builds request objects internally
