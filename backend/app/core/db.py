@@ -181,6 +181,25 @@ class Database:
             return None
         return EquitySnapshot.model_validate(dict(row))
 
+    async def is_owner(self, user_id: UUID) -> bool:
+        """True if `user_id` is the single allowlisted owner (`app_owner`).
+
+        The API auth layer calls this after verifying a Supabase JWT, to make
+        the single-owner authorization decision that RLS would otherwise make
+        (this module connects as a role that bypasses RLS -- see module docs).
+        A connection/query failure raises :class:`DatabaseError` (fail closed:
+        the caller must deny, never allow, when ownership can't be confirmed).
+        """
+        try:
+            return bool(
+                await self._pool.fetchval(
+                    "select exists(select 1 from app_owner where user_id = $1)",
+                    user_id,
+                )
+            )
+        except _DB_FAILURE_TYPES as exc:
+            raise DatabaseError("failed to read app_owner") from exc
+
     # -- writes ---------------------------------------------------------- #
 
     async def update_settings(
