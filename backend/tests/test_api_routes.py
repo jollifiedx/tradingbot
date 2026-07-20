@@ -83,6 +83,7 @@ class _FakeDB:
         self._snapshot = snapshot
         self._owners = owners
         self._fail = fail
+        self.last_update: dict[str, object] = {}
 
     async def get_settings(self) -> BotSettings:
         if self._fail:
@@ -103,6 +104,41 @@ class _FakeDB:
         if self._fail:
             raise DatabaseError("boom")
         return user_id in self._owners
+
+    async def update_settings(
+        self,
+        *,
+        updated_by: UUID,
+        frozen: bool | None = None,
+        buy_power_cap: Decimal | None = None,
+        max_daily_loss: Decimal | None = None,
+        max_per_trade_cap: Decimal | None = None,
+        staleness_threshold_seconds: int | None = None,
+    ) -> BotSettings:
+        if self._fail:
+            raise DatabaseError("boom")
+        # Mirror the real helper: coalesce omitted (None) fields, attribute the
+        # change, and echo back the resulting row.
+        self.last_update = {
+            "updated_by": updated_by,
+            "frozen": frozen,
+            "buy_power_cap": buy_power_cap,
+            "max_daily_loss": max_daily_loss,
+            "max_per_trade_cap": max_per_trade_cap,
+            "staleness_threshold_seconds": staleness_threshold_seconds,
+        }
+        updates: dict[str, object] = {"updated_by": updated_by}
+        if frozen is not None:
+            updates["frozen"] = frozen
+        if buy_power_cap is not None:
+            updates["buy_power_cap"] = buy_power_cap
+        if max_daily_loss is not None:
+            updates["max_daily_loss"] = max_daily_loss
+        if max_per_trade_cap is not None:
+            updates["max_per_trade_cap"] = max_per_trade_cap
+        if staleness_threshold_seconds is not None:
+            updates["staleness_threshold_seconds"] = staleness_threshold_seconds
+        return _settings().model_copy(update=updates)
 
 
 @pytest.fixture(autouse=True)
@@ -158,6 +194,87 @@ def test_db_failure_maps_to_503() -> None:
 
 
 # --------------------------------------------------------------------------
+# PATCH /settings route behaviour (auth satisfied). This is the owner's
+# freeze/cap control surface -- money in/out stays Decimal-as-string.
+# --------------------------------------------------------------------------
+
+
+def test_patch_settings_freeze_toggle_ok_and_attributed() -> None:
+    db = _FakeDB()
+    client = _auth_ok(db)
+    resp = client.patch("/settings", json={"frozen": False})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["frozen"] is False
+    # updated_by is the authenticated owner id the gate returned.
+    assert body["updated_by"] == str(OWNER_ID)
+    # Money still serializes as string on the PATCH response (never float).
+    assert isinstance(body["buy_power_cap"], str)
+    # Only the field we sent was forwarded to the DB helper (coalesce the rest).
+    assert db.last_update["frozen"] is False
+    assert db.last_update["buy_power_cap"] is None
+
+
+def test_patch_settings_cap_update_ok_money_as_string() -> None:
+    client = _auth_ok(_FakeDB())
+    resp = client.patch("/settings", json={"buy_power_cap": "2500.00"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["buy_power_cap"] == "2500.00"
+    assert isinstance(body["buy_power_cap"], str)
+
+
+def test_patch_settings_negative_cap_422() -> None:
+    client = _auth_ok(_FakeDB())
+    resp = client.patch("/settings", json={"buy_power_cap": "-1.00"})
+    assert resp.status_code == 422
+
+
+def test_patch_settings_staleness_nonpositive_422() -> None:
+    client = _auth_ok(_FakeDB())
+    assert (
+        client.patch("/settings", json={"staleness_threshold_seconds": 0}).status_code
+        == 422
+    )
+
+
+def test_patch_settings_empty_body_422() -> None:
+    client = _auth_ok(_FakeDB())
+    assert client.patch("/settings", json={}).status_code == 422
+
+
+def test_patch_settings_unknown_field_422() -> None:
+    # extra="forbid": a caller cannot smuggle in id/updated_by/etc.
+    client = _auth_ok(_FakeDB())
+    resp = client.patch("/settings", json={"frozen": True, "id": True})
+    assert resp.status_code == 422
+
+
+def test_patch_settings_db_failure_maps_to_503() -> None:
+    client = _auth_ok(_FakeDB(fail=True))
+    assert client.patch("/settings", json={"frozen": True}).status_code == 503
+
+
+def test_patch_settings_money_field_is_string_in_openapi() -> None:
+    # The generated TS client must treat caps as strings, never JS numbers
+    # (precision loss on money). Assert the request-body schema types them
+    # string, matching the GET response money fields.
+    schema = app.openapi()
+    body_schema = schema["paths"]["/settings"]["patch"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    ref = body_schema["$ref"].removeprefix("#/components/schemas/")
+    props = schema["components"]["schemas"][ref]["properties"]
+    for field in ("buy_power_cap", "max_daily_loss", "max_per_trade_cap"):
+        # Optional field -> anyOf of the money type and null; the money branch
+        # must be a string, never a number.
+        branches = props[field]["anyOf"]
+        types = {b.get("type") for b in branches}
+        assert "string" in types, f"{field} must accept string money: {branches}"
+        assert "number" not in types, f"{field} must not be a JS number: {branches}"
+
+
+# --------------------------------------------------------------------------
 # The auth gate itself (real require_owner; introspection + ownership mocked).
 # --------------------------------------------------------------------------
 
@@ -205,3 +322,19 @@ def test_gate_owner_200(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _gated_client(monkeypatch, _FakeDB())
     resp = client.get("/settings", headers={"Authorization": "Bearer owner-token"})
     assert resp.status_code == 200
+
+
+def test_patch_gate_no_token_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The write path (freeze/caps) must be unreachable without auth.
+    client = _gated_client(monkeypatch, _FakeDB())
+    assert client.patch("/settings", json={"frozen": True}).status_code == 401
+
+
+def test_patch_gate_valid_but_not_owner_403(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _gated_client(monkeypatch, _FakeDB())
+    resp = client.patch(
+        "/settings",
+        json={"frozen": True},
+        headers={"Authorization": "Bearer nonowner-token"},
+    )
+    assert resp.status_code == 403
