@@ -35,4 +35,4 @@ class Settings(BaseSettings):
 
 def load_settings() -> Settings:
     """Load and validate config. Raises on any missing required value (fail closed)."""
-    return Settings()  # type: ignore[call-arg]  # values come from the environment
+    return Settings()
