@@ -81,3 +81,52 @@ create policy orders_select_owner on orders
     for select
     to authenticated
     using (is_app_owner());
+
+-- orders_current: the latest (terminal, i.e. leaf-of-chain) row for every order
+-- lifecycle, plus the client_order_id of the chain's root submission. Because each
+-- status transition is a new row linked via previous_order_id rather than a mutation
+-- (see file header), finding "where does this order stand right now" otherwise requires
+-- hand-walking previous_order_id chains in application/reconciliation code. This view
+-- does that walk once, in SQL.
+--
+-- `security_invoker = true` (Postgres 15+, matches Supabase's Postgres version) makes
+-- the view run with the privileges *and* RLS policies of the querying role rather than
+-- the view owner's -- so orders_select_owner still applies per-row exactly as it does
+-- against the base table. The view carries no privileges of its own beyond what the
+-- underlying orders table already grants; it is not a new RLS surface, just a SELECT-only
+-- convenience over the existing one.
+create view orders_current
+with (security_invoker = true)
+as
+with recursive order_chain as (
+    -- anchor: root row of every chain (the initial submission, no previous_order_id)
+    select
+        o.id,
+        o.id as chain_root_id,
+        o.client_order_id as chain_root_client_order_id
+    from orders o
+    where o.previous_order_id is null
+
+    union all
+
+    -- recursive: walk forward from each root, following previous_order_id links
+    select
+        o.id,
+        oc.chain_root_id,
+        oc.chain_root_client_order_id
+    from orders o
+    join order_chain oc on o.previous_order_id = oc.id
+)
+select
+    o.*,
+    oc.chain_root_id,
+    oc.chain_root_client_order_id
+from orders o
+join order_chain oc on o.id = oc.id
+where not exists (
+    -- terminal = no later row in the chain points back to this one
+    select 1 from orders nxt where nxt.previous_order_id = o.id
+);
+
+comment on view orders_current is
+    'One row per order lifecycle: the terminal (latest) orders row in each previous_order_id chain, plus chain_root_id/chain_root_client_order_id identifying the original submission. security_invoker = true, so orders_select_owner RLS applies per underlying row -- no separate grant needed.';

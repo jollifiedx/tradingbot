@@ -63,4 +63,23 @@ trigger functions defined before their triggers). Whoever links a project and ru
 back if anything fails — HNSW index availability in particular depends on the pgvector
 version bundled with the target Postgres image.
 
+**Post-architect-review fixes (2026-07-19, still pre-apply, amended in place):** `log_settings_history()`
+in `20260719000004_settings.sql` was SECURITY INVOKER, which silently broke the
+authenticated owner's UPDATE path (dashboard freeze/cap changes) because the trigger's
+INSERT into `settings_history` was RLS-rejected under the invoker's authenticated role
+(no INSERT policy exists on `settings_history` by design). Fixed to SECURITY DEFINER +
+`set search_path = public`, same pattern as `is_app_owner()`. General lesson: any
+SECURITY INVOKER trigger function that writes to a *different* RLS-protected table than
+the one it's attached to needs this same check — the invoker's role must actually have
+an applicable INSERT/UPDATE policy on the target, or use SECURITY DEFINER. Also: added
+`orders_current` view (in `20260719000007_orders.sql`, recursive CTE walking
+`previous_order_id` chains to the terminal/leaf row per chain, `security_invoker = true`
+so `orders_select_owner` RLS still applies) so reconciliation code doesn't have to
+hand-walk chains; tightened `guard_trade_close()` in `20260719000008_trades.sql` to
+actually assert `new.status = 'closed'` (previously the comment claimed this but the code
+didn't enforce it — repeated no-op-ish UPDATEs to an open row would have silently
+passed); and locked `is_app_owner()`'s EXECUTE grant down from PUBLIC (Postgres functions
+default to PUBLIC EXECUTE, unlike tables) to `authenticated, service_role` in
+`20260719000002_app_owner.sql`.
+
 See also [[feedback-file-only-db-work]] for the workflow constraint this task was done under.

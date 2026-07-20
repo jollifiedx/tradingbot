@@ -53,3 +53,12 @@ $$;
 
 comment on function is_app_owner() is
     'True if the calling authenticated user is the single allowlisted TradingBot owner. Used by RLS policies across all tables.';
+
+-- Functions default to PUBLIC EXECUTE in Postgres (unlike tables, which default to
+-- owner-only). is_app_owner() only ever returns a boolean and is SECURITY DEFINER, so it
+-- doesn't leak app_owner's contents -- but there's no reason for the anon role or other
+-- unauthenticated callers to be able to invoke it at all. Lock EXECUTE down to the roles
+-- that actually need it: authenticated (every RLS policy that calls it) and service_role
+-- (API/worker, for parity/tooling even though service_role bypasses RLS outright).
+revoke execute on function is_app_owner() from public;
+grant execute on function is_app_owner() to authenticated, service_role;

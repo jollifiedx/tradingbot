@@ -107,9 +107,19 @@ create policy settings_history_select_owner on settings_history
     using (is_app_owner());
 
 -- Trigger function that snapshots settings into settings_history on every insert/update.
+--
+-- SECURITY DEFINER (mirroring is_app_owner() in 20260719000002_app_owner.sql): the
+-- authenticated owner path updates `settings` directly via the settings_update_owner
+-- policy, but settings_history has RLS enabled with only a SELECT policy -- no INSERT
+-- policy for `authenticated`. A SECURITY INVOKER trigger would run this INSERT as the
+-- authenticated role and be RLS-rejected, aborting the entire settings UPDATE. Running
+-- as the (table-owning) definer bypasses that RLS gap for this one, narrowly-scoped
+-- insert, the same way is_app_owner() bypasses RLS on app_owner reads.
 create function log_settings_history()
 returns trigger
 language plpgsql
+security definer
+set search_path = public
 as $$
 begin
     insert into settings_history (
@@ -122,6 +132,9 @@ begin
     return new;
 end;
 $$;
+
+comment on function log_settings_history() is
+    'SECURITY DEFINER so the authenticated owner path (settings_update_owner policy) can UPDATE settings without the resulting settings_history INSERT being RLS-rejected (settings_history has no INSERT policy for authenticated by design -- it is written only via this trigger).';
 
 create trigger settings_log_history
     after insert or update on settings

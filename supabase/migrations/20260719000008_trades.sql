@@ -66,6 +66,13 @@ begin
             using errcode = '0A000';
     end if;
 
+    if new.status is distinct from 'closed' then
+        raise exception
+            'trades row %: the only permitted UPDATE is the open -> closed transition (attempted status=%)'
+            , old.id, new.status
+            using errcode = '0A000';
+    end if;
+
     if new.symbol is distinct from old.symbol
         or new.entry_order_id is distinct from old.entry_order_id
         or new.quantity is distinct from old.quantity
