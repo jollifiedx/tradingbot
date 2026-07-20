@@ -60,6 +60,14 @@ plugins = ["pydantic.mypy"]
 module = ["webull.*"]
 ignore_missing_imports = true
 
+# asyncpg ships no py.typed marker / stubs either. Scoped the same way as
+# webull.* above rather than relaxing strict mode globally; all asyncpg
+# access is confined to app/core/db.py, which validates every row into a
+# Pydantic model (app.core.models) before it leaves the module.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

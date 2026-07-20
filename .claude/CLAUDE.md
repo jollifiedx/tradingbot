@@ -65,21 +65,24 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   ruff/mypy-strict/pytest, smoke test. Initial schema: 11 migrations in `supabase/migrations/`
   (audit chain decisions→orders→trades, append-only triggers + SELECT-only RLS, pgvector
   theses, singleton settings born frozen with caps=0).
-- **In progress:** Schema applied to Supabase dev project 2026-07-20 (11 migrations via
-  asyncpg with CLI-compatible tracking in supabase_migrations.schema_migrations); 15/15
-  runtime smoke tests passed (append-only triggers, singleton, born-frozen, SECURITY DEFINER
-  history logging, fail-closed app_owner). Webull wrapper reviewed by architect: no blockers,
-  1 DRIFT open (auto_retry=False + credential-log silencing lack regression tests) + NOTE
-  (is_live/env label doesn't gate host routing — order path must not rely on it). Next:
-  wrapper DRIFT tests; Pydantic models mirroring schema; resolve Webull paper endpoint
-  question (SDK ships live hosts only — see broker-integrator memory).
-- **Known issues / debt:** Backend verified locally (Python 3.12.10). Webull paper creds +
-  Supabase keys in backend/.env. supabase CLI + Docker not installed (migrations applied via
-  asyncpg script). No PRD beyond research files. Safety "never" rules exist only as prompts —
-  must become PreToolUse hooks / permissions.deny before live trading. app_owner still empty
-  (needs Esther's Supabase Auth UID once auth-setup creates her user — until then all
-  authenticated RLS denies, fail-closed). Optional hardening awaiting owner OK: unique
-  partial index on orders.previous_order_id (audit-table constraint → owner approval).
+  Schema applied to Supabase dev 2026-07-20 (15/15 runtime smoke tests). Pydantic model
+  layer (models.py, 1:1 mirror + drift-guard tests). Webull wrapper (read-only, account_v2)
+  verified LIVE on sandbox (get_account_list→200, 5 accounts; balance parsed). DB-access
+  layer (db.py: asyncpg pool + lifespan + get_settings/get_decisions/get_latest_equity_
+  snapshot/update_settings, fail-closed). app_owner populated with Esther's Auth UID.
+- **In progress:** First dashboard API routes (orchestrator plan a3e1…): auth chosen =
+  app_owner allowlist + FastAPI JWT owner check (service_role bypasses RLS, so API enforces).
+  PATCH /settings IN scope (owner-approved). Next: auth middleware → GET /settings,/decisions,
+  /account → PATCH /settings (execution-guardian + architect) → wire main.py + drift review →
+  frontend-engineer api-client-regen. GET /positions DEFERRED (no DB source; Invariant 2).
+- **Known issues / debt:** Backend verified locally (Python 3.12.10, 74 tests green). Webull
+  paper creds + Supabase keys in backend/.env. supabase CLI + Docker not installed (migrations
+  via asyncpg script). Webull follow-ups: buying_power/settled_funds nested under
+  account_currency_assets parse to None (BLOCKS cap logic until confirmed); get_order_status
+  still on v1 path (execution-guardian switches to order_v2 at order-path time); position
+  field names unverified (paper account empty). Safety "never" rules exist only as prompts —
+  must become PreToolUse hooks / permissions.deny before live trading. Optional hardening
+  awaiting owner OK: unique partial index on orders.previous_order_id (audit-table → approval).
 
 ## Agent Instructions
 
