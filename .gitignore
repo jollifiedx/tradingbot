@@ -1,0 +1,36 @@
+# Secrets — never committed (values live in Railway env vars / local .env)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Node / frontend (kept out of OneDrive sync pain)
+node_modules/
+frontend/dist/
+.vite/
+
+# Supabase local
+supabase/.temp/
+supabase/.branches/
+
+# Claude Code local-only files
+.claude/settings.local.json
+CLAUDE.local.md
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
