@@ -56,15 +56,44 @@ current SDK version before relying on any of these — they were true at 2.0.14.
   US_ETF, US_OPTION, US_CRYPTO, ... `OrderStatus`: SUBMITTED, CANCELLED, FAILED,
   FILLED, PARTIAL_FILLED (label is "PARTIAL FILLED" with a space — normalise
   space→underscore when mapping). Query params take the name string.
-- **Account-id discovery methods (read-only).** The wrapper takes `account_id`
-  as input; to *find* it, v1 `trade.account` exposes `get_app_subscriptions()`
-  (docstring: "query the account list and return account information") and the v2
-  object `trade.account_v2` exposes `get_account_list()`. v1 `Account` methods:
-  `get_account_balance(account_id, total_asset_currency)`,
-  `get_account_position(account_id, page_size=10, last_instrument_id=None)`,
-  `get_account_profile`, `get_app_subscriptions`. (No `webull.trade.api` /
-  `webull.trade.api_request` modules exist — real path is
-  `webull.trade.trade.account_info.Account`.)
+- **USE `account_v2`, NOT `account`, for account reads.** CONFIRMED against the
+  live sandbox (2026-07-20): the v1 `trade.account.*` methods build OLD request
+  paths (`/account/balance`, `/account/positions`, `/app/subscriptions/list`)
+  that **404** at `api.sandbox.webull.com`. The v2 sub-client `trade.account_v2`
+  builds the documented `/openapi/...` paths that return **200**:
+  - `account_v2.get_account_list()` → `GET /openapi/account/list` (no args) —
+    the "Verify Your Setup" account-discovery call. Returns the account list.
+  - `account_v2.get_account_balance(account_id)` → `GET /openapi/assets/balance`
+    — **account_id only, NO currency arg** (unlike v1). Not paged.
+  - `account_v2.get_account_position(account_id)` → `GET /openapi/assets/positions`
+    — **account_id only, NO paging args** (unlike v1's page_size/last_instrument_id);
+    returns ALL positions in one un-paged response. (`get_account_position_details`
+    with paging exists but is JP-only.)
+  The wrapper now calls account_v2 exclusively and exposes `list_accounts()`.
+  v1 `trade.account` (`get_account_balance(account_id, total_asset_currency)`,
+  `get_account_position(account_id, page_size, last_instrument_id)`,
+  `get_app_subscriptions`, `get_account_profile`) is a dead/legacy path — do not
+  use. Real module: `webull.trade.trade.v2.account_info_v2.AccountV2`.
+- **Order reads have the same v1/v2 split (UNPATCHED, flagged).** `trade.order`
+  (v1) `query_order_detail` builds `/trade/order/detail`; the working path is
+  `trade.order_v2.get_order_detail(account_id, client_order_id)` →
+  `/openapi/trade/order/detail`. The wrapper's `get_order_status` still points at
+  v1 `trade.order.query_order_detail` and will very likely 404 the same way —
+  fix it (switch to `order_v2`) when order-status work is picked up. Left as-is
+  here because order-status is a later milestone / execution-guardian's surface.
+- **Real sandbox balance field names (CONFIRMED 2026-07-20).**
+  `/openapi/assets/balance` top-level keys: `total_asset_currency`,
+  `total_net_liquidation_value`, `total_cash_balance`, `total_market_value`,
+  `total_day_profit_loss`, `total_unrealized_profit_loss`,
+  `account_currency_assets` (a list — per-currency breakdown). There is **no
+  top-level `account_id`, `buying_power`, or `settled_funds`.** The old parser
+  guessed `net_liquidation_value` / `total_cash_value` / `currency` — all wrong;
+  corrected to the real names. `buying_power`/`settled_funds` real names are
+  likely nested inside `account_currency_assets` but were NOT probed (call-budget
+  cap) — currently parse to None; confirm before cap logic relies on them.
+- **`get_account_list` returns `account_type` per account** (values seen:
+  `CASH`, `MARGIN`); the sandbox app key saw 5 accounts. Per-account `currency`
+  and `status` came back null in the list response.
 - **`ServerException` fields are response-side and safe to log.** It carries
   `error_code`, `error_msg`, `http_status`, `request_id` (all from the server's
   reply, no request headers) — unlike the `ClientException`/request-`vars`

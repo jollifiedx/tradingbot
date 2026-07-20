@@ -16,6 +16,7 @@ from .exceptions import (
 )
 from .models import (
     AccountBalance,
+    AccountInfo,
     AccountSnapshot,
     AccountSnapshotRequest,
     BarTimespan,
@@ -31,6 +32,7 @@ from .models import (
 
 __all__ = [
     "AccountBalance",
+    "AccountInfo",
     "AccountSnapshot",
     "AccountSnapshotRequest",
     "BarTimespan",

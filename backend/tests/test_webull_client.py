@@ -112,7 +112,9 @@ def _make_client(
     """Build a WebullClient with injected fake trade/data clients (no SDK build)."""
     client = WebullClient(_dummy_settings(env), rate_limiter=limiter)  # type: ignore[arg-type]
     fake_trade = _Namespace(
-        account=_Namespace(**(account_fns or {})),
+        # SDK 2.0.14: the working (``/openapi/...``) account paths live on the
+        # ``account_v2`` sub-client, not the v1 ``account`` object.
+        account_v2=_Namespace(**(account_fns or {})),
         order=_Namespace(**(order_fns or {})),
     )
     fake_data = _Namespace(market_data=_Namespace(**(market_fns or {})))
@@ -235,27 +237,54 @@ def test_account_snapshot_happy_path() -> None:
     assert limiter.calls == 2
 
 
-def test_account_snapshot_paginates_positions() -> None:
-    pages = [
-        FakeResponse(
+# Real top-level field names observed from the live Webull sandbox
+# (/openapi/assets/balance, SDK 2.0.14). Locks the parser to the proven shape so
+# a rename back to the old guessed names regresses loudly. buying_power /
+# settled_funds are intentionally absent (they are not top-level in the sandbox
+# response), so they parse as None.
+_BALANCE_REAL_SANDBOX = {
+    "total_asset_currency": "USD",
+    "total_net_liquidation_value": "10000.50",
+    "total_cash_balance": "2500.25",
+    "total_market_value": "7500.25",
+    "total_day_profit_loss": "12.34",
+    "total_unrealized_profit_loss": "98.99",
+    "account_currency_assets": [],
+}
+
+
+def test_account_snapshot_parses_real_sandbox_balance_field_names() -> None:
+    client = _make_client(
+        account_fns={
+            "get_account_balance": lambda *_: FakeResponse(_BALANCE_REAL_SANDBOX),
+            "get_account_position": lambda *_: FakeResponse([]),
+        },
+    )
+    snap = client.get_account_snapshot(AccountSnapshotRequest(account_id="ACC1"))
+    assert snap.balance.currency == "USD"
+    assert snap.balance.net_liquidation == Decimal("10000.50")
+    assert snap.balance.total_cash == Decimal("2500.25")
+    # No top-level account id in the sandbox balance -> falls back to request id.
+    assert snap.balance.account_id == "ACC1"
+    # Not top-level in the sandbox response -> None (real names unconfirmed).
+    assert snap.balance.buying_power is None
+    assert snap.balance.settled_funds is None
+
+
+def test_account_snapshot_positions_single_call_keyed_on_account_id() -> None:
+    """SDK v2 ``account_v2.get_account_position(account_id)`` returns every
+    position in one un-paged response and is passed only the account id."""
+    call_log: list[tuple[Any, ...]] = []
+
+    def _positions(*args: Any) -> Any:
+        call_log.append(args)
+        return FakeResponse(
             [
                 {"instrument_id": "1", "symbol": "AAA", "quantity": "1"},
                 {"instrument_id": "2", "symbol": "BBB", "quantity": "2"},
-            ]
-        ),
-        FakeResponse(
-            [
                 {"instrument_id": "3", "symbol": "CCC", "quantity": "3"},
-                {"instrument_id": "4", "symbol": "DDD", "quantity": "4"},
             ]
-        ),
-        FakeResponse([{"instrument_id": "5", "symbol": "EEE", "quantity": "5"}]),
-    ]
-    call_log: list[Any] = []
-
-    def _positions(account_id: str, page_size: int, last_id: Any) -> Any:
-        call_log.append(last_id)
-        return pages[len(call_log) - 1]
+        )
 
     client = _make_client(
         account_fns={
@@ -263,12 +292,70 @@ def test_account_snapshot_paginates_positions() -> None:
             "get_account_position": _positions,
         },
     )
-    req = AccountSnapshotRequest(account_id="ACC1", page_size=2, max_pages=10)
-    snap = client.get_account_snapshot(req)
+    snap = client.get_account_snapshot(AccountSnapshotRequest(account_id="ACC1"))
 
-    assert [p.symbol for p in snap.positions] == ["AAA", "BBB", "CCC", "DDD", "EEE"]
-    # First page starts with no cursor, then walks by last instrument id.
-    assert call_log == [None, "2", "4"]
+    assert [p.symbol for p in snap.positions] == ["AAA", "BBB", "CCC"]
+    # Exactly one positions call, receiving only the account id (no paging args).
+    assert call_log == [("ACC1",)]
+
+
+# --------------------------------------------------------------------------- #
+# Account list (id discovery — /openapi/account/list)
+# --------------------------------------------------------------------------- #
+
+_ACCOUNTS_OK = [
+    {
+        "account_id": "ACC1",
+        "account_number": "5XX-12345678",
+        "account_type": "CASH",
+        "currency": "USD",
+        "status": "ACTIVE",
+    }
+]
+
+
+def test_list_accounts_happy_path() -> None:
+    limiter = CountingLimiter()
+    client = _make_client(
+        account_fns={"get_account_list": lambda *_: FakeResponse(_ACCOUNTS_OK)},
+        limiter=limiter,
+    )
+    accounts = client.list_accounts()
+
+    assert len(accounts) == 1
+    assert accounts[0].account_id == "ACC1"
+    assert accounts[0].account_type == "CASH"
+    assert limiter.calls == 1
+
+
+def test_list_accounts_accepts_wrapped_envelope() -> None:
+    client = _make_client(
+        account_fns={
+            "get_account_list": lambda *_: FakeResponse({"accounts": _ACCOUNTS_OK})
+        },
+    )
+    accounts = client.list_accounts()
+    assert [a.account_id for a in accounts] == ["ACC1"]
+
+
+def test_list_accounts_auth_failure() -> None:
+    client = _make_client(
+        account_fns={
+            "get_account_list": _raises(
+                ServerException("AUTH", "forbidden", http_status=403)
+            )
+        },
+    )
+    with pytest.raises(WebullAuthError):
+        client.list_accounts()
+
+
+def test_list_accounts_malformed() -> None:
+    client = _make_client(
+        account_fns={"get_account_list": lambda *_: BadJsonResponse()},
+    )
+    with pytest.raises(WebullMalformedResponseError):
+        client.list_accounts()
 
 
 def test_account_snapshot_auth_failure() -> None:

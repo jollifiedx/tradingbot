@@ -1,8 +1,22 @@
 ---
 name: webull-paper-endpoint-open-question
-description: Open question — the SDK has no paper/live switch and ships only LIVE endpoint hosts; the exact Webull paper-trading host + how credentials select paper vs live is unconfirmed and must be resolved before paper data flows over the network.
+description: RESOLVED (2026-07-20) — sandbox host api.sandbox.webull.com is correct; the earlier 404 was a wrong SDK method (v1 account paths), not a bad host. account_v2 calls return 200. Kept for history.
 metadata:
   type: project
+---
+
+**RESOLVED 2026-07-20.** The host was never the problem. The earlier sandbox 404
+came from calling the WRONG SDK method (v1 `account.get_app_subscriptions`, which
+builds the legacy `/app/subscriptions/list` path). Switching to the `account_v2`
+sub-client (documented `/openapi/...` paths) makes the SAME host —
+`api.sandbox.webull.com` — return **HTTP 200**: `account_v2.get_account_list()`
+returned 5 sandbox accounts with the paper App Key/Secret + `WEBULL_ENV=paper` +
+`WEBULL_PAPER_API_ENDPOINT=api.sandbox.webull.com`. So candidate (a) — a distinct
+paper *trade* host set via the override seam — is CONFIRMED sufficient, and the
+paper credentials are valid (they authenticated, not just 404'd). Method-name
+details and confirmed field names now live in [[webull-sdk-quirks]]. The
+historical investigation below is retained for context.
+
 ---
 
 The Webull SDK (2.0.14) exposes **no paper/live toggle**; its bundled

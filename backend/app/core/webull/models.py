@@ -103,14 +103,16 @@ class _LenientResponseModel(BaseModel):
 
 
 class AccountSnapshotRequest(_StrictModel):
-    """Inputs for :meth:`WebullClient.get_account_snapshot`."""
+    """Inputs for :meth:`WebullClient.get_account_snapshot`.
+
+    The SDK 2.0.14 v2 assets endpoints (``account_v2.get_account_balance`` /
+    ``get_account_position``) take only an ``account_id`` — balance is not
+    currency-parameterised and positions are returned in a single, un-paged
+    response — so this request carries only the account id. Discover the id via
+    :meth:`WebullClient.list_accounts` (``/openapi/account/list``).
+    """
 
     account_id: str = Field(min_length=1)
-    currency: str = "USD"
-    # Positions are paginated by the SDK (max 100/page); the wrapper walks pages
-    # up to this many to assemble the full list.
-    max_pages: int = Field(default=20, ge=1, le=100)
-    page_size: int = Field(default=100, ge=1, le=100)
 
 
 class HistoricalBarsRequest(_StrictModel):
@@ -132,6 +134,22 @@ class OrderStatusRequest(_StrictModel):
 # --------------------------------------------------------------------------- #
 # Response models
 # --------------------------------------------------------------------------- #
+
+
+class AccountInfo(_LenientResponseModel):
+    """One brokerage account as returned by ``/openapi/account/list``.
+
+    Used to *discover* the ``account_id`` the read paths key on. Only
+    ``account_id`` is required; the rest are best-effort metadata that Webull may
+    or may not populate per region. ``account_number`` is a sensitive value — the
+    wrapper never logs it; callers that surface it should mask to the last 4.
+    """
+
+    account_id: str
+    account_number: str | None = None
+    account_type: str | None = None
+    currency: str | None = None
+    status: str | None = None
 
 
 class AccountBalance(_LenientResponseModel):

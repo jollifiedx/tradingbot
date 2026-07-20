@@ -58,6 +58,7 @@ from .exceptions import (
 )
 from .models import (
     AccountBalance,
+    AccountInfo,
     AccountSnapshot,
     AccountSnapshotRequest,
     HistoricalBars,
@@ -274,25 +275,43 @@ class WebullClient:
 
     # -- public API -------------------------------------------------------- #
 
+    def list_accounts(self) -> tuple[AccountInfo, ...]:
+        """Return the brokerage accounts this app key can see (read-only).
+
+        Maps to the SDK's ``account_v2.get_account_list()``
+        (``GET /openapi/account/list``) — the documented "Verify Your Setup"
+        call. This is how the ``account_id`` the read paths key on is
+        discovered; the worker looks it up once at startup rather than
+        hardcoding it.
+        """
+        trade = self._trade()
+        body = self._unwrap(self._call(trade.account_v2.get_account_list))
+        raw_accounts = self._extract_account_list(body)
+        return tuple(self._parse_account_info(raw) for raw in raw_accounts)
+
     def get_account_snapshot(self, request: AccountSnapshotRequest) -> AccountSnapshot:
         """Return cash/buying-power + all open positions for an account.
 
         Webull is the source of truth for positions and cash (Invariant 6); the
-        worker reconciles DB intent against this snapshot. Positions are paged by
-        the SDK (max 100/page); we walk up to ``request.max_pages``.
+        worker reconciles DB intent against this snapshot. Uses the SDK v2 assets
+        endpoints (``account_v2.get_account_balance`` /
+        ``get_account_position``), which key on ``account_id`` alone: balance is
+        a single call and positions come back in one un-paged response.
         """
         trade = self._trade()
 
         balance_body = self._unwrap(
-            self._call(
-                trade.account.get_account_balance,
-                request.account_id,
-                request.currency,
-            )
+            self._call(trade.account_v2.get_account_balance, request.account_id)
         )
         balance = self._parse_balance(balance_body, request)
 
-        positions = self._collect_positions(trade, request)
+        positions_body = self._unwrap(
+            self._call(trade.account_v2.get_account_position, request.account_id)
+        )
+        positions = [
+            self._parse_position(raw)
+            for raw in self._extract_position_list(positions_body)
+        ]
         try:
             return AccountSnapshot(
                 balance=balance,
@@ -357,32 +376,6 @@ class WebullClient:
     # gating, etc.), never in this read-only wrapper. Do not add them here; a
     # mutating method on this class is an ESCALATION.
     # --------------------------------------------------------------------- #
-
-    # -- pagination -------------------------------------------------------- #
-
-    def _collect_positions(
-        self, trade: Any, request: AccountSnapshotRequest
-    ) -> list[Position]:
-        positions: list[Position] = []
-        last_instrument_id: str | None = None
-        for _ in range(request.max_pages):
-            body = self._unwrap(
-                self._call(
-                    trade.account.get_account_position,
-                    request.account_id,
-                    request.page_size,
-                    last_instrument_id,
-                )
-            )
-            page = self._extract_position_list(body)
-            if not page:
-                break
-            for raw in page:
-                positions.append(self._parse_position(raw))
-            if len(page) < request.page_size:
-                break
-            last_instrument_id = positions[-1].instrument_id
-        return positions
 
     # -- call plumbing ----------------------------------------------------- #
 
@@ -482,6 +475,21 @@ class WebullClient:
             return []
         raise WebullMalformedResponseError("unexpected positions payload shape")
 
+    @staticmethod
+    def _extract_account_list(body: Any) -> Sequence[Any]:
+        if isinstance(body, list):
+            return body
+        if isinstance(body, dict):
+            for key in ("accounts", "account_list", "items", "list"):
+                value = body.get(key)
+                if isinstance(value, list):
+                    return value
+            # A single account object (not wrapped in a list) is still valid.
+            if "account_id" in body or "accountId" in body:
+                return [body]
+            return []
+        raise WebullMalformedResponseError("unexpected account-list payload shape")
+
     # -- parsers ----------------------------------------------------------- #
 
     @staticmethod
@@ -492,6 +500,26 @@ class WebullClient:
                 return value
         return None
 
+    def _parse_account_info(self, raw: Any) -> AccountInfo:
+        if not isinstance(raw, dict):
+            raise WebullMalformedResponseError("unexpected account-list entry shape")
+        try:
+            return AccountInfo(
+                account_id=str(self._pick(raw, "account_id", "accountId") or ""),
+                account_number=self._opt_str(
+                    self._pick(raw, "account_number", "accountNumber")
+                ),
+                account_type=self._opt_str(
+                    self._pick(raw, "account_type", "accountType")
+                ),
+                currency=self._opt_str(self._pick(raw, "currency")),
+                status=self._opt_str(self._pick(raw, "status", "account_status")),
+            )
+        except ValidationError as exc:
+            raise WebullMalformedResponseError(
+                "account-list entry failed validation"
+            ) from exc
+
     def _parse_balance(
         self, body: Any, request: AccountSnapshotRequest
     ) -> AccountBalance:
@@ -500,14 +528,36 @@ class WebullClient:
         if not isinstance(body, dict):
             raise WebullMalformedResponseError("unexpected balance payload shape")
         try:
+            # Field names below with a "REAL:" note were confirmed against the
+            # live Webull sandbox balance response (SDK 2.0.14,
+            # /openapi/assets/balance); the remaining aliases are defensive
+            # fallbacks. buying_power / settled_funds are NOT top-level in the
+            # sandbox response (they live nested under account_currency_assets);
+            # their real names are unconfirmed, so those fields may be None until
+            # the nested shape is proven — see broker-integrator memory.
             return AccountBalance(
-                account_id=str(self._pick(body, "account_id") or request.account_id),
-                currency=str(self._pick(body, "currency") or request.currency),
+                # Sandbox balance has no top-level account id; fall back to the
+                # requested one (the endpoint is already keyed on it).
+                account_id=str(
+                    self._pick(body, "account_id", "accountId") or request.account_id
+                ),
+                # REAL: total_asset_currency
+                currency=str(
+                    self._pick(body, "total_asset_currency", "currency") or "USD"
+                ),
                 net_liquidation=self._pick(
-                    body, "net_liquidation_value", "net_liquidation", "total_asset"
+                    body,
+                    "total_net_liquidation_value",  # REAL
+                    "net_liquidation_value",
+                    "net_liquidation",
+                    "total_asset",
                 ),
                 total_cash=self._pick(
-                    body, "total_cash_value", "cash_balance", "total_cash"
+                    body,
+                    "total_cash_balance",  # REAL
+                    "total_cash_value",
+                    "cash_balance",
+                    "total_cash",
                 ),
                 buying_power=self._pick(body, "buying_power", "day_buying_power"),
                 settled_funds=self._pick(
