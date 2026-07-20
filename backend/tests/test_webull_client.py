@@ -239,9 +239,9 @@ def test_account_snapshot_happy_path() -> None:
 
 # Real top-level field names observed from the live Webull sandbox
 # (/openapi/assets/balance, SDK 2.0.14). Locks the parser to the proven shape so
-# a rename back to the old guessed names regresses loudly. buying_power /
-# settled_funds are intentionally absent (they are not top-level in the sandbox
-# response), so they parse as None.
+# a rename back to the old guessed names regresses loudly. Here the per-currency
+# `account_currency_assets` list is empty (an edge case), so buying_power /
+# settled_funds have no source and parse as None.
 _BALANCE_REAL_SANDBOX = {
     "total_asset_currency": "USD",
     "total_net_liquidation_value": "10000.50",
@@ -250,6 +250,34 @@ _BALANCE_REAL_SANDBOX = {
     "total_day_profit_loss": "12.34",
     "total_unrealized_profit_loss": "98.99",
     "account_currency_assets": [],
+}
+
+# Full live sandbox balance shape CONFIRMED 2026-07-20: buying_power and
+# settled_cash live nested in the per-currency account_currency_assets entry, not
+# at the top level. Locks in the nested extraction so a regression to the old
+# top-level-only parse (which returned None) fails loudly.
+_BALANCE_REAL_SANDBOX_NESTED = {
+    "total_asset_currency": "USD",
+    "total_net_liquidation_value": "1000000.00",
+    "total_cash_balance": "1000000.00",
+    "total_market_value": "0.00",
+    "total_day_profit_loss": "0.00",
+    "total_unrealized_profit_loss": "0.00",
+    "account_currency_assets": [
+        {
+            "currency": "USD",
+            "net_liquidation_value": "1000000.00",
+            "market_value": "0.00",
+            "cash_balance": "1000000.00",
+            "settled_cash": "1000000.00",
+            "unsettled_cash": "0.00",
+            "buying_power": "1000000.00",
+            "option_buying_power": "1000000.00",
+            "night_trading_buying_power": "0.00",
+            "unrealized_profit_loss": "0.00",
+            "day_profit_loss": "0.00",
+        }
+    ],
 }
 
 
@@ -266,9 +294,26 @@ def test_account_snapshot_parses_real_sandbox_balance_field_names() -> None:
     assert snap.balance.total_cash == Decimal("2500.25")
     # No top-level account id in the sandbox balance -> falls back to request id.
     assert snap.balance.account_id == "ACC1"
-    # Not top-level in the sandbox response -> None (real names unconfirmed).
+    # Empty account_currency_assets here -> nested figures unavailable -> None.
     assert snap.balance.buying_power is None
     assert snap.balance.settled_funds is None
+
+
+def test_account_snapshot_parses_nested_buying_power_and_settled_cash() -> None:
+    client = _make_client(
+        account_fns={
+            "get_account_balance": lambda *_: FakeResponse(
+                _BALANCE_REAL_SANDBOX_NESTED
+            ),
+            "get_account_position": lambda *_: FakeResponse([]),
+        },
+    )
+    snap = client.get_account_snapshot(AccountSnapshotRequest(account_id="ACC1"))
+    assert snap.balance.net_liquidation == Decimal("1000000.00")
+    assert snap.balance.total_cash == Decimal("1000000.00")
+    # REAL: pulled from account_currency_assets[].buying_power / settled_cash.
+    assert snap.balance.buying_power == Decimal("1000000.00")
+    assert snap.balance.settled_funds == Decimal("1000000.00")
 
 
 def test_account_snapshot_positions_single_call_keyed_on_account_id() -> None:

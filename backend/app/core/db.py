@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -264,6 +265,65 @@ class Database:
         if row is None:
             raise DatabaseError("settings singleton row is missing")
         return BotSettings.model_validate(dict(row))
+
+    async def insert_equity_snapshot(
+        self,
+        *,
+        account_equity: Decimal,
+        cash_balance: Decimal,
+        buying_power: Decimal | None,
+        is_paper: bool = True,
+        snapshot_date: date | None = None,
+    ) -> EquitySnapshot:
+        """Store one `equity_snapshots` row (the number the dashboard shows).
+
+        `snapshot_date` defaults to today's UTC date; `recorded_at` is left to the
+        column default (`now()`). The `spy_close_price` / `spy_benchmark_equity`
+        benchmark columns are deliberately left NULL here -- populating the SPY
+        buy-and-hold benchmark is a separate concern (strategy-quant), not part of
+        reading the broker balance.
+
+        `snapshot_date` is UNIQUE, and the migration's own comment notes a
+        same-day snapshot may reasonably be recomputed intraday (worker restart,
+        corrected reconciliation). So this UPSERTs on `snapshot_date`: a re-run on
+        the same day overwrites that day's row (refreshing `recorded_at`) rather
+        than raising a unique-violation -- matching the table's "not append-only,
+        left mutable" design, and keeping the job idempotent per UTC day.
+
+        `buying_power` is nullable at this boundary because the broker balance can
+        legitimately not carry it; note however that the `equity_snapshots.buying_
+        power` column is `NOT NULL`, so passing `None` fails closed as a
+        :class:`DatabaseError` (a row is never written with a fabricated value).
+        Raises :class:`DatabaseError` on any connection/query failure (fail
+        closed) -- callers must not treat that as "no snapshot written".
+        """
+        snap_date = snapshot_date or datetime.now(UTC).date()
+        try:
+            row = await self._pool.fetchrow(
+                """
+                insert into equity_snapshots
+                    (snapshot_date, account_equity, cash_balance, buying_power,
+                     is_paper)
+                values ($1, $2, $3, $4, $5)
+                on conflict (snapshot_date) do update set
+                    account_equity = excluded.account_equity,
+                    cash_balance = excluded.cash_balance,
+                    buying_power = excluded.buying_power,
+                    is_paper = excluded.is_paper,
+                    recorded_at = now()
+                returning *
+                """,
+                snap_date,
+                account_equity,
+                cash_balance,
+                buying_power,
+                is_paper,
+            )
+        except _DB_FAILURE_TYPES as exc:
+            raise DatabaseError("failed to insert equity_snapshot") from exc
+        if row is None:
+            raise DatabaseError("equity_snapshot insert returned no row")
+        return EquitySnapshot.model_validate(dict(row))
 
 
 @asynccontextmanager

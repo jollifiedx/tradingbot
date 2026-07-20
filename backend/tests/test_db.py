@@ -191,6 +191,13 @@ async def test_update_settings_updates_given_fields_and_logs_history(tx: _Tx) ->
     before = await tx.db.get_settings()
     new_threshold = before.staleness_threshold_seconds + 1
 
+    # Count the history rows for this actor BEFORE the update: the dev DB may
+    # already hold committed rows from real owner activity, so assert the
+    # trigger writes exactly ONE new row (a delta), not an absolute total.
+    history_before = await tx.conn.fetchval(
+        "select count(*) from settings_history where changed_by = $1", actor
+    )
+
     updated = await tx.db.update_settings(
         updated_by=actor,
         staleness_threshold_seconds=new_threshold,
@@ -205,15 +212,95 @@ async def test_update_settings_updates_given_fields_and_logs_history(tx: _Tx) ->
     assert updated.max_daily_loss == before.max_daily_loss
     assert updated.max_per_trade_cap == before.max_per_trade_cap
 
-    history_count = await tx.conn.fetchval(
+    history_after = await tx.conn.fetchval(
         "select count(*) from settings_history where changed_by = $1", actor
     )
-    assert history_count == 1
+    assert history_after - history_before == 1
 
 
 async def test_update_settings_requires_at_least_one_field(tx: _Tx) -> None:
     with pytest.raises(ValueError, match="at least one field"):
         await tx.db.update_settings(updated_by=uuid4())
+
+
+# --------------------------------------------------------------------------
+# insert_equity_snapshot
+# --------------------------------------------------------------------------
+
+
+async def test_insert_equity_snapshot_round_trips(tx: _Tx) -> None:
+    result = await tx.db.insert_equity_snapshot(
+        account_equity=Decimal("1000000.00"),
+        cash_balance=Decimal("999000.00"),
+        buying_power=Decimal("1000000.00"),
+        is_paper=True,
+        snapshot_date=date(2099, 6, 1),
+    )
+
+    assert isinstance(result, EquitySnapshot)
+    assert result.snapshot_date == date(2099, 6, 1)
+    assert result.account_equity == Decimal("1000000.00")
+    assert result.cash_balance == Decimal("999000.00")
+    assert result.buying_power == Decimal("1000000.00")
+    assert result.is_paper is True
+    # benchmark columns are left for a separate concern (strategy-quant)
+    assert result.spy_close_price is None
+    assert result.spy_benchmark_equity is None
+    assert result.recorded_at.tzinfo is not None  # timestamptz -> UTC-aware
+
+
+async def test_insert_equity_snapshot_defaults_snapshot_date_to_today_utc(
+    tx: _Tx,
+) -> None:
+    today = datetime.now(UTC).date()
+    # Clear any real same-day row so the default-date insert can't collide inside
+    # this rolled-back tx (never committed -- see fixture).
+    await tx.conn.execute("delete from equity_snapshots where snapshot_date = $1", today)
+
+    result = await tx.db.insert_equity_snapshot(
+        account_equity=Decimal("500.00"),
+        cash_balance=Decimal("500.00"),
+        buying_power=Decimal("500.00"),
+    )
+
+    assert result.snapshot_date == today
+    assert result.is_paper is True  # default
+
+
+async def test_insert_equity_snapshot_upserts_same_day(tx: _Tx) -> None:
+    day = date(2099, 6, 2)
+    first = await tx.db.insert_equity_snapshot(
+        account_equity=Decimal("1000.00"),
+        cash_balance=Decimal("1000.00"),
+        buying_power=Decimal("1000.00"),
+        snapshot_date=day,
+    )
+    second = await tx.db.insert_equity_snapshot(
+        account_equity=Decimal("1234.00"),
+        cash_balance=Decimal("1200.00"),
+        buying_power=Decimal("1234.00"),
+        snapshot_date=day,
+    )
+
+    # Same day -> one row, overwritten (not a duplicate, not a unique violation).
+    assert first.id == second.id
+    assert second.account_equity == Decimal("1234.00")
+    count = await tx.conn.fetchval(
+        "select count(*) from equity_snapshots where snapshot_date = $1", day
+    )
+    assert count == 1
+
+
+async def test_insert_equity_snapshot_null_buying_power_fails_closed(tx: _Tx) -> None:
+    # buying_power is nullable at the call boundary, but the column is NOT NULL:
+    # a None must fail closed as DatabaseError, never write a fabricated value.
+    with pytest.raises(DatabaseError):
+        await tx.db.insert_equity_snapshot(
+            account_equity=Decimal("1.00"),
+            cash_balance=Decimal("1.00"),
+            buying_power=None,
+            snapshot_date=date(2099, 6, 3),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -253,3 +340,13 @@ async def test_update_settings_wraps_failure_as_database_error() -> None:
     db = Database(_RaisingPool())  # type: ignore[arg-type]
     with pytest.raises(DatabaseError):
         await db.update_settings(updated_by=uuid4(), frozen=True)
+
+
+async def test_insert_equity_snapshot_wraps_failure_as_database_error() -> None:
+    db = Database(_RaisingPool())  # type: ignore[arg-type]
+    with pytest.raises(DatabaseError):
+        await db.insert_equity_snapshot(
+            account_equity=Decimal("1.00"),
+            cash_balance=Decimal("1.00"),
+            buying_power=Decimal("1.00"),
+        )

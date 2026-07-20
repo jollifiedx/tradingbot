@@ -520,6 +520,32 @@ class WebullClient:
                 "account-list entry failed validation"
             ) from exc
 
+    @staticmethod
+    def _currency_asset(body: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return the per-currency asset entry for the account's reporting currency.
+
+        Webull's ``/openapi/assets/balance`` keeps only aggregate *totals* at the
+        top level; the per-currency breakdown (including ``buying_power`` and
+        ``settled_cash``) lives nested in the ``account_currency_assets`` list.
+        CONFIRMED against the live sandbox (SDK 2.0.14, 2026-07-20): a single-USD
+        paper account returns one entry whose keys include ``buying_power``,
+        ``settled_cash``, ``cash_balance`` and ``net_liquidation_value``.
+
+        Picks the entry whose ``currency`` matches the account's
+        ``total_asset_currency`` (falling back to the first entry, then to an
+        empty mapping) so multi-currency accounts still resolve the reporting
+        currency's figures rather than an arbitrary one.
+        """
+        assets = body.get("account_currency_assets")
+        if not isinstance(assets, list) or not assets:
+            return {}
+        reporting_ccy = body.get("total_asset_currency")
+        for entry in assets:
+            if isinstance(entry, dict) and entry.get("currency") == reporting_ccy:
+                return entry
+        first = assets[0]
+        return first if isinstance(first, dict) else {}
+
     def _parse_balance(
         self, body: Any, request: AccountSnapshotRequest
     ) -> AccountBalance:
@@ -527,14 +553,39 @@ class WebullClient:
             body = body[0] if body else {}
         if not isinstance(body, dict):
             raise WebullMalformedResponseError("unexpected balance payload shape")
+        # Aggregate totals live at the top level; buying_power / settled funds
+        # live nested in the per-currency entry (see _currency_asset). CONFIRMED
+        # against the live sandbox 2026-07-20 — see broker-integrator memory.
+        ccy_asset = self._currency_asset(body)
         try:
-            # Field names below with a "REAL:" note were confirmed against the
-            # live Webull sandbox balance response (SDK 2.0.14,
-            # /openapi/assets/balance); the remaining aliases are defensive
-            # fallbacks. buying_power / settled_funds are NOT top-level in the
-            # sandbox response (they live nested under account_currency_assets);
-            # their real names are unconfirmed, so those fields may be None until
-            # the nested shape is proven — see broker-integrator memory.
+            net_liquidation = self._pick(
+                body,
+                "total_net_liquidation_value",  # REAL (top-level total)
+                "net_liquidation_value",
+                "net_liquidation",
+                "total_asset",
+            )
+            if net_liquidation is None:
+                net_liquidation = ccy_asset.get("net_liquidation_value")
+            total_cash = self._pick(
+                body,
+                "total_cash_balance",  # REAL (top-level total)
+                "total_cash_value",
+                "cash_balance",
+                "total_cash",
+            )
+            if total_cash is None:
+                total_cash = ccy_asset.get("cash_balance")
+            # REAL: nested account_currency_assets[].buying_power.
+            buying_power = self._pick(body, "buying_power", "day_buying_power")
+            if buying_power is None:
+                buying_power = ccy_asset.get("buying_power")
+            # REAL: nested account_currency_assets[].settled_cash.
+            settled_funds = self._pick(
+                body, "settled_funds", "cash_available_for_trading"
+            )
+            if settled_funds is None:
+                settled_funds = ccy_asset.get("settled_cash")
             return AccountBalance(
                 # Sandbox balance has no top-level account id; fall back to the
                 # requested one (the endpoint is already keyed on it).
@@ -543,26 +594,14 @@ class WebullClient:
                 ),
                 # REAL: total_asset_currency
                 currency=str(
-                    self._pick(body, "total_asset_currency", "currency") or "USD"
+                    self._pick(body, "total_asset_currency", "currency")
+                    or ccy_asset.get("currency")
+                    or "USD"
                 ),
-                net_liquidation=self._pick(
-                    body,
-                    "total_net_liquidation_value",  # REAL
-                    "net_liquidation_value",
-                    "net_liquidation",
-                    "total_asset",
-                ),
-                total_cash=self._pick(
-                    body,
-                    "total_cash_balance",  # REAL
-                    "total_cash_value",
-                    "cash_balance",
-                    "total_cash",
-                ),
-                buying_power=self._pick(body, "buying_power", "day_buying_power"),
-                settled_funds=self._pick(
-                    body, "settled_funds", "cash_available_for_trading"
-                ),
+                net_liquidation=net_liquidation,
+                total_cash=total_cash,
+                buying_power=buying_power,
+                settled_funds=settled_funds,
             )
         except ValidationError as exc:
             raise WebullMalformedResponseError(

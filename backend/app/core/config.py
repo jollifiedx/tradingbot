@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # the wrapper raises a typed config error if a paper client is built while
     # it is still blank. Env var: WEBULL_PAPER_API_ENDPOINT.
     webull_paper_api_endpoint: str | None = None
+    # The single Webull account the bot reads/reports/acts on. The app key can see
+    # several accounts (CASH + MARGIN); the worker must operate on exactly ONE,
+    # pinned here deliberately (a real owner decision) rather than guessed. When
+    # unset, the dev snapshot job falls back to the first CASH account that returns
+    # a complete balance -- adequate to surface a dev number, NOT safe for real
+    # trading (account ordering is non-deterministic). Never logged in full (masked
+    # to last 4). Env var: WEBULL_ACCOUNT_ID.
+    webull_account_id: str | None = None
 
     # Anthropic (research pipeline only — never imported by the order path)
     anthropic_api_key: str

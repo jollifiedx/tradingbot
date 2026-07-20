@@ -88,9 +88,36 @@ current SDK version before relying on any of these — they were true at 2.0.14.
   `account_currency_assets` (a list — per-currency breakdown). There is **no
   top-level `account_id`, `buying_power`, or `settled_funds`.** The old parser
   guessed `net_liquidation_value` / `total_cash_value` / `currency` — all wrong;
-  corrected to the real names. `buying_power`/`settled_funds` real names are
-  likely nested inside `account_currency_assets` but were NOT probed (call-budget
-  cap) — currently parse to None; confirm before cap logic relies on them.
+  corrected to the real names.
+- **buying_power / settled funds are NESTED — RESOLVED 2026-07-20.** They live
+  inside `account_currency_assets[]` (the per-currency entry), NOT at top level.
+  Real nested keys on a CASH account: `currency`, `net_liquidation_value`,
+  `market_value`, `cash_balance`, `settled_cash`, `unsettled_cash`,
+  `buying_power`, `option_buying_power`, `night_trading_buying_power`,
+  `unrealized_profit_loss`, `day_profit_loss`. So **`settled_funds` real name is
+  `settled_cash`**. `_parse_balance` now picks the currency entry matching
+  `total_asset_currency` (falls back to first) and reads `buying_power` /
+  `settled_cash` from it (with top-level still preferred if ever present). This
+  unblocks the buy-power cap basis. CAVEAT: **the nested buying-power key varies
+  by account type** — a MARGIN account (***KVMB) exposed `day_buying_power` /
+  `option_buying_power` / `overnight_buying_power` but NO plain `buying_power`,
+  so the parser returns None there. Cap logic (execution-guardian) must decide
+  which buying-power figure is authoritative per account type before relying on
+  `AccountBalance.buying_power` for a margin account.
+- **Sandbox exposes 5 CANNED DEMO accounts with DIFFERENT shapes, in
+  NON-DETERMINISTIC order (2026-07-20).** `get_account_list()` returns the same 5
+  accounts (3 CASH + 2 MARGIN, each $1,000,000 paper) but **in a different order
+  on each call** — do NOT rely on positional/"first" selection. Worse, the demo
+  accounts return *different* balance shapes: one CASH account (***N5K9) omits
+  top-level `total_net_liquidation_value`/`total_cash_balance` AND the nested
+  `net_liquidation_value`/`cash_balance` (only `market_value`/`buying_power`
+  present) → net_liq/cash parse to None. One CASH account (***S3LB) is fully
+  populated. Occasional transient `ServerException http_status=417
+  OAUTH_OPENAPI_SYSTEM_ERROR "System error"` on a balance call (retryable). Upshot:
+  the snapshot worker must PIN the account (see `WEBULL_ACCOUNT_ID` /
+  `settings.webull_account_id`), never guess; its dev fallback iterates CASH
+  accounts and takes the first with a COMPLETE balance (net_liq+cash+buying_power
+  all present), failing closed otherwise.
 - **`get_account_list` returns `account_type` per account** (values seen:
   `CASH`, `MARGIN`); the sandbox app key saw 5 accounts. Per-account `currency`
   and `status` came back null in the list response.
