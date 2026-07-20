@@ -11,6 +11,8 @@ failure, plus exception-translation and safety-posture checks.
 
 from __future__ import annotations
 
+import logging
+import sys
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -19,6 +21,7 @@ import pytest
 
 # Importing the SDK's exception types here (test-only) to simulate raw SDK
 # failures. Production code confines SDK imports to app/core/webull/client.py.
+from webull.core.common.api_type import DEFAULT as _SDK_TRADE_API_TYPE
 from webull.core.exception import error_code
 from webull.core.exception.exceptions import ClientException, ServerException
 
@@ -32,23 +35,30 @@ from app.core.webull import (
     WebullAPIError,
     WebullAuthError,
     WebullClient,
+    WebullConfigError,
     WebullError,
     WebullMalformedResponseError,
     WebullRateLimitError,
     WebullTimeoutError,
 )
+from app.core.webull import client as client_mod
 
 # --------------------------------------------------------------------------- #
 # Test doubles
 # --------------------------------------------------------------------------- #
 
 
-def _dummy_settings(env: WebullEnv = WebullEnv.PAPER) -> Settings:
+def _dummy_settings(
+    env: WebullEnv = WebullEnv.PAPER,
+    *,
+    paper_endpoint: str | None = None,
+) -> Settings:
     """Settings with all-dummy values; explicit kwargs override any .env file."""
     return Settings(
         webull_app_key="dummy-key",
         webull_app_secret="dummy-secret",
         webull_env=env,
+        webull_paper_api_endpoint=paper_endpoint,
         anthropic_api_key="dummy-anthropic",
         supabase_url="https://dummy.supabase.co",
         supabase_anon_key="dummy-anon",
@@ -117,6 +127,38 @@ def _raises(exc: BaseException) -> Any:
         raise exc
 
     return _fn
+
+
+class FakeApiClient:
+    """Records how the wrapper constructs the SDK ``ApiClient``.
+
+    Captures constructor kwargs (so tests can assert ``auto_retry`` etc.) and
+    every ``add_endpoint`` call (so tests can assert host routing). Allows
+    arbitrary attribute assignment so the wrapper's ``_stream_logger_set`` seam
+    can be observed.
+    """
+
+    instances: list[FakeApiClient] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.endpoints: list[tuple[str, str, str]] = []
+        # Set by the wrapper's _build_api_client seam (documented SDK quirk);
+        # declared here so mypy knows the attribute exists.
+        self._stream_logger_set: bool = False
+        FakeApiClient.instances.append(self)
+
+    def add_endpoint(self, region_id: str, host: str, api_type: str) -> None:
+        self.endpoints.append((region_id, host, api_type))
+
+
+def _patch_sdk_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the SDK symbols in client.py so ``_build_api_client`` never hits the
+    network: ApiClient becomes a recorder, Trade/DataClient become cheap fakes."""
+    FakeApiClient.instances.clear()
+    monkeypatch.setattr(client_mod, "ApiClient", FakeApiClient)
+    monkeypatch.setattr(client_mod, "TradeClient", lambda _api: _Namespace())
+    monkeypatch.setattr(client_mod, "DataClient", lambda _api: _Namespace())
 
 
 # --------------------------------------------------------------------------- #
@@ -537,3 +579,170 @@ def test_unexpected_raw_exception_is_wrapped_never_leaks() -> None:
             HistoricalBarsRequest(symbol="AAPL", timespan=BarTimespan.DAY)
         )
     assert not isinstance(excinfo.value, WebullAPIError)
+
+
+# --------------------------------------------------------------------------- #
+# Safety regression guards (architect DRIFT): these lock down two behaviours
+# that are otherwise invisible (they only matter when the real SDK is built),
+# so they cannot silently regress.
+# --------------------------------------------------------------------------- #
+
+
+def test_sdk_client_built_with_auto_retry_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Idempotency invariant: the SDK must never blind-retry for us. If anyone
+    flips ``auto_retry`` on (or drops the kwarg), this fails."""
+    _patch_sdk_build(monkeypatch)
+    client = WebullClient(_dummy_settings(paper_endpoint="https://paper.example.test"))
+    client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build under test
+
+    assert len(FakeApiClient.instances) == 1
+    built = FakeApiClient.instances[0]
+    assert "auto_retry" in built.kwargs, "auto_retry must be passed explicitly"
+    assert built.kwargs["auto_retry"] is False
+
+
+def test_sdk_logging_silencing_mechanism_in_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The credential-leak silencing must be active after a client is built:
+    the ``webull`` logger carries only a NullHandler, does not propagate, and the
+    per-client ``_stream_logger_set`` flag is set so the SDK skips its own
+    stdout/file loggers. Fails if any of those mechanisms is removed."""
+    sdk_logger = logging.getLogger("webull")
+    saved_handlers = sdk_logger.handlers
+    saved_propagate = sdk_logger.propagate
+    try:
+        # Put the logger into a deliberately LEAKY state first, so this proves
+        # the build *actively* silences it rather than finding it already quiet.
+        sdk_logger.handlers = [logging.StreamHandler(sys.stdout)]
+        sdk_logger.propagate = True
+
+        _patch_sdk_build(monkeypatch)
+        client = WebullClient(
+            _dummy_settings(paper_endpoint="https://paper.example.test")
+        )
+        client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+
+        assert sdk_logger.propagate is False
+        assert len(sdk_logger.handlers) == 1
+        assert isinstance(sdk_logger.handlers[0], logging.NullHandler)
+        built = FakeApiClient.instances[0]
+        assert built._stream_logger_set is True  # noqa: SLF001 - documented seam
+    finally:
+        sdk_logger.handlers = saved_handlers
+        sdk_logger.propagate = saved_propagate
+
+
+def test_sdk_log_record_with_secret_does_not_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Any,
+) -> None:
+    """A simulated SDK log record carrying a fake secret must reach neither
+    stdout/stderr nor a log file after the client is built."""
+    fake_secret = "SECRET-app-secret-DO-NOT-LEAK-9f2b"  # noqa: S105 - test literal
+    sdk_logger = logging.getLogger("webull")
+    saved_handlers = sdk_logger.handlers
+    saved_propagate = sdk_logger.propagate
+    try:
+        # Leaky starting state (would print the secret if silencing were removed).
+        sdk_logger.handlers = [logging.StreamHandler(sys.stdout)]
+        sdk_logger.propagate = True
+        monkeypatch.chdir(tmp_path)  # any rogue file logger would land here
+
+        _patch_sdk_build(monkeypatch)
+        client = WebullClient(
+            _dummy_settings(paper_endpoint="https://paper.example.test")
+        )
+        client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+
+        # Emit exactly the kind of record the SDK logs at ERROR (request vars can
+        # include signed auth headers) on a child logger of "webull".
+        logging.getLogger("webull.trade.trade_client").error(
+            "request=%s", {"x-app-secret": fake_secret}
+        )
+        for handler in logging.getLogger("webull").handlers:
+            handler.flush()
+
+        captured = capsys.readouterr()
+        assert fake_secret not in captured.out
+        assert fake_secret not in captured.err
+        # No log file anywhere under the CWD should contain the secret either.
+        for path in tmp_path.rglob("*"):
+            if path.is_file():
+                assert fake_secret not in path.read_text(errors="ignore")
+    finally:
+        sdk_logger.handlers = saved_handlers
+        sdk_logger.propagate = saved_propagate
+
+
+# --------------------------------------------------------------------------- #
+# Environment-gated host routing (architect NOTE): env must REALLY gate the
+# host the SDK talks to — not just a descriptive label — and fail closed.
+# --------------------------------------------------------------------------- #
+
+
+def test_paper_build_routes_to_paper_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """paper + endpoint set → the trade/account api host is overridden to the
+    paper endpoint (the SDK otherwise resolves only LIVE hosts)."""
+    _patch_sdk_build(monkeypatch)
+    paper_host = "https://paper-api.example.test"
+    client = WebullClient(_dummy_settings(paper_endpoint=paper_host))
+    client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+
+    built = FakeApiClient.instances[0]
+    assert (client._region_id, paper_host, _SDK_TRADE_API_TYPE) in built.endpoints  # noqa: SLF001
+
+
+def test_paper_build_missing_endpoint_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """paper + blank endpoint → typed config error; the wrapper must NEVER fall
+    back to the SDK's default (live) host."""
+    _patch_sdk_build(monkeypatch)
+    client = WebullClient(_dummy_settings(paper_endpoint=None))
+    with pytest.raises(WebullConfigError):
+        client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+    # And a whitespace-only value is treated the same as blank.
+    client_ws = WebullClient(_dummy_settings(paper_endpoint="   "))
+    with pytest.raises(WebullConfigError):
+        client_ws._ensure_clients()  # noqa: SLF001
+    # No live host was ever registered.
+    assert FakeApiClient.instances == []
+
+
+def test_live_build_raises_not_implemented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """live → NotImplementedError at build time, even if a paper endpoint happens
+    to be set. Live is a later, owner-gated milestone."""
+    _patch_sdk_build(monkeypatch)
+    client = WebullClient(
+        _dummy_settings(env=WebullEnv.LIVE, paper_endpoint="https://paper.example.test")
+    )
+    with pytest.raises(NotImplementedError):
+        client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+    assert FakeApiClient.instances == []
+
+
+def test_explicit_endpoint_override_wins_over_paper_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit per-api-type override (the seam for a paper quotes host) takes
+    precedence over the env-derived paper default for the same api type."""
+    _patch_sdk_build(monkeypatch)
+    override_host = "https://explicit.example.test"
+    client = WebullClient(
+        _dummy_settings(paper_endpoint="https://paper-api.example.test"),
+        endpoint_overrides={_SDK_TRADE_API_TYPE: override_host},
+    )
+    client._ensure_clients()  # noqa: SLF001 - triggers the lazy SDK build
+
+    built = FakeApiClient.instances[0]
+    hosts_for_trade = [
+        host for (_region, host, api_type) in built.endpoints
+        if api_type == _SDK_TRADE_API_TYPE
+    ]
+    assert hosts_for_trade == [override_host]

@@ -44,6 +44,13 @@ current SDK version before relying on any of these — they were true at 2.0.14.
   wrapper drives it off `settings.webull_env` and exposes an `endpoint_overrides`
   seam (`ApiClient.add_endpoint(region, host, api_type)`). See
   [[webull-paper-endpoint-open-question]] — exact paper host is unconfirmed.
+- **Three endpoint `api_type` constants** in `webull.core.common.api_type`:
+  `DEFAULT = "api"` (trade + account host), `QUOTES = "quotes-api"` (market
+  data), `EVENTS = "events-api"` (streaming). `add_endpoint(region, host,
+  api_type)` overrides ONE api-type's host at a time; `_resolve_endpoint(request)`
+  only takes `region_id`, so per-api-type routing is the override key. The
+  wrapper maps the paper endpoint onto `DEFAULT` only (trade/account is what
+  distinguishes paper money from live; quotes stay on the live feed).
 - **Enums serialize to their member NAME** (`EasyEnum.__str__` returns `.name`).
   `Timespan`: M1,M5,M15,M30,M60,M120,M240,D,W,M,Y. `Category`: US_STOCK,
   US_ETF, US_OPTION, US_CRYPTO, ... `OrderStatus`: SUBMITTED, CANCELLED, FAILED,

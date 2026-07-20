@@ -268,7 +268,7 @@ class Decision(BaseModel):
     decided_at: AwareDatetime
     symbol: str
     action: DecisionAction
-    rules_fired: Annotated[list[Any] | dict[str, Any], Field(default_factory=list)]
+    rules_fired: list[Any] | dict[str, Any] = Field(default_factory=list)
     llm_rationale: str | None = None
     thesis_id: UUID | None = None
     conviction: Conviction4_3 | None = None

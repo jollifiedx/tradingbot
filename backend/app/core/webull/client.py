@@ -11,7 +11,11 @@ implemented here — see the ``ORDER-PATH SEAM`` marker below. That surface
 belongs to execution-guardian's audited order path.
 
 Safety posture:
-- paper vs live is driven entirely by ``settings.webull_env`` — never hardcoded.
+- paper vs live is driven entirely by ``settings.webull_env`` — never hardcoded
+  — and that env *gates host routing* (not just a label): a paper client is
+  built against ``settings.webull_paper_api_endpoint`` and refuses to fall back
+  to the SDK's default (live) host; a live client raises ``NotImplementedError``
+  until live is an owner-gated, explicitly-enabled milestone.
 - explicit connect + read timeouts on every call (SDK-level, applied globally).
 - a coarse client-side rate limiter keeps us under Webull's documented ceilings
   (~600 req/min trading, ~15 req/sec orders).
@@ -35,6 +39,7 @@ from pydantic import ValidationError
 # webull.* is untyped (no py.typed); mypy is scoped to ignore missing imports
 # for that package only (see pyproject [[tool.mypy.overrides]]).
 from webull.core.client import ApiClient
+from webull.core.common.api_type import DEFAULT as _SDK_TRADE_API_TYPE
 from webull.core.exception import error_code
 from webull.core.exception.exceptions import ClientException, ServerException
 from webull.data.data_client import DataClient
@@ -45,6 +50,7 @@ from app.core.config import Settings, WebullEnv
 from .exceptions import (
     WebullAPIError,
     WebullAuthError,
+    WebullConfigError,
     WebullError,
     WebullMalformedResponseError,
     WebullRateLimitError,
@@ -146,10 +152,13 @@ class WebullClient:
         """Build a client from validated :class:`Settings`.
 
         ``settings.webull_env`` (paper|live) is captured verbatim and exposed via
-        :attr:`env` / :attr:`is_live`; nothing in this wrapper assumes an
-        environment. ``endpoint_overrides`` maps SDK api-type → host and is the
-        seam for pointing a paper environment at a distinct host once Webull's
-        exact paper host is confirmed — without touching code.
+        :attr:`env` / :attr:`is_live`. It also *gates host routing* when the SDK
+        client is lazily built (see :meth:`_resolve_endpoint_overrides`): paper
+        routes to ``settings.webull_paper_api_endpoint`` or fails closed; live
+        raises ``NotImplementedError``. ``endpoint_overrides`` maps SDK api-type
+        → host and is the seam for pointing a specific api type (e.g. a paper
+        *quotes* host) at a distinct host without touching code; entries here win
+        over the env-derived default.
         """
         self._settings = settings
         self._env: WebullEnv = settings.webull_env
@@ -179,7 +188,54 @@ class WebullClient:
 
     # -- lazy SDK construction --------------------------------------------- #
 
+    def _resolve_endpoint_overrides(self) -> dict[str, str]:
+        """Return the api-type → host overrides to apply, gated by environment.
+
+        This is where paper/live host routing is *actually enforced* (not merely
+        labelled). Fail closed:
+
+        - **live** → :class:`NotImplementedError`. Live is a later, owner-gated
+          milestone; the wrapper must never silently build a client that can
+          reach live hosts.
+        - **paper** → the SDK ships only LIVE hosts, so we MUST override the
+          trade/account api host with ``settings.webull_paper_api_endpoint``. If
+          that is unset/blank we raise :class:`WebullConfigError` rather than let
+          the SDK resolve to its default (live) host. Explicit per-api-type
+          ``endpoint_overrides`` passed to the constructor win over this default
+          (the seam for a distinct paper *quotes* host, if Webull provides one).
+
+        Market-data (quotes) calls intentionally keep resolving to the live
+        quotes host unless explicitly overridden: Webull paper accounts read the
+        same live market data; only order/account routing distinguishes paper
+        from live money.
+        """
+        if self._env is WebullEnv.LIVE:
+            raise NotImplementedError(
+                "Webull live environment is not enabled — live is a later, "
+                "owner-gated milestone. Refusing to build a live client."
+            )
+        if self._env is not WebullEnv.PAPER:
+            # Defensive: WebullEnv is a closed enum, but fail closed on anything
+            # that is neither paper nor live rather than defaulting to live hosts.
+            raise WebullConfigError(f"unrecognised webull_env: {self._env!r}")
+
+        paper_host = (self._settings.webull_paper_api_endpoint or "").strip()
+        if not paper_host:
+            raise WebullConfigError(
+                "WEBULL_ENV=paper but WEBULL_PAPER_API_ENDPOINT is unset/blank; "
+                "refusing to fall back to the SDK's default (live) host. Set the "
+                "paper endpoint from the Webull developer portal in the "
+                "environment before building a paper client."
+            )
+        overrides: dict[str, str] = {_SDK_TRADE_API_TYPE: paper_host}
+        # Explicit constructor overrides take precedence (e.g. a paper quotes host).
+        overrides.update(self._endpoint_overrides)
+        return overrides
+
     def _build_api_client(self) -> Any:
+        # Resolve host routing FIRST so a misconfigured environment fails closed
+        # before we construct anything or touch the network.
+        endpoint_overrides = self._resolve_endpoint_overrides()
         _silence_sdk_logging()
         client = ApiClient(
             app_key=self._settings.webull_app_key,
@@ -192,7 +248,7 @@ class WebullClient:
         # Pre-set the flag so TradeClient/DataClient skip installing their own
         # stdout + file loggers (see _silence_sdk_logging).
         client._stream_logger_set = True  # noqa: SLF001 - documented SDK seam
-        for api_type, host in self._endpoint_overrides.items():
+        for api_type, host in endpoint_overrides.items():
             client.add_endpoint(self._region_id, host, api_type)
         return client
 

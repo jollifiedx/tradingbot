@@ -8,6 +8,7 @@ from .client import WebullClient
 from .exceptions import (
     WebullAPIError,
     WebullAuthError,
+    WebullConfigError,
     WebullError,
     WebullMalformedResponseError,
     WebullRateLimitError,
@@ -44,6 +45,7 @@ __all__ = [
     "WebullAPIError",
     "WebullAuthError",
     "WebullClient",
+    "WebullConfigError",
     "WebullError",
     "WebullMalformedResponseError",
     "WebullRateLimitError",

@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     webull_app_key: str
     webull_app_secret: str
     webull_env: WebullEnv = WebullEnv.PAPER  # paper unless explicitly promoted
+    # Paper-trading API host (from the Webull developer portal). The SDK ships
+    # only LIVE endpoint hosts, so when webull_env == paper the client wrapper
+    # MUST route requests to this host and refuses to fall back to live (fail
+    # closed). May be blank until the owner pastes the portal value into .env;
+    # the wrapper raises a typed config error if a paper client is built while
+    # it is still blank. Env var: WEBULL_PAPER_API_ENDPOINT.
+    webull_paper_api_endpoint: str | None = None
 
     # Anthropic (research pipeline only — never imported by the order path)
     anthropic_api_key: str

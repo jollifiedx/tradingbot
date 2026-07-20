@@ -31,6 +31,16 @@ class WebullError(Exception):
         self.code = code
 
 
+class WebullConfigError(WebullError):
+    """The wrapper is misconfigured for the selected environment (fail closed).
+
+    Raised at SDK-client construction time — e.g. ``WEBULL_ENV=paper`` but
+    ``WEBULL_PAPER_API_ENDPOINT`` is unset/blank. The wrapper refuses to fall
+    back to the SDK's default (live) hosts, so a paper deployment that is missing
+    its paper host halts loudly instead of silently pointing at live.
+    """
+
+
 class WebullAuthError(WebullError):
     """Authentication / authorization failure (bad key, expired token, 401/403).
 
