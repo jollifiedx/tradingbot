@@ -65,16 +65,16 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   ruff/mypy-strict/pytest, smoke test. Initial schema: 11 migrations in `supabase/migrations/`
   (audit chain decisions→orders→trades, append-only triggers + SELECT-only RLS, pgvector
   theses, singleton settings born frozen with caps=0).
-- **In progress:** AWAITING OWNER SIGN-OFF on initial audit-table shapes (settings defaults,
-  decisions.action enum, orders enums + previous_order_id chaining) before the schema is
-  applied anywhere — db-engineer escalation 2026-07-19. Architect review of schema also
-  pending. Next after sign-off: link Supabase dev project + apply; Pydantic models mirroring
-  schema; Webull client wrapper.
-- **Known issues / debt:** Python not installed on this machine (backend can't run/test
-  locally yet). Webull OpenAPI application not yet submitted (1–2 day approval — submit
-  early). No PRD beyond research files. Safety "never" rules exist only as prompts — must
-  become PreToolUse hooks / permissions.deny before live trading. app_owner table must be
-  populated with Esther's Supabase Auth UID per environment or all RLS denies (fail-closed).
+- **In progress:** Schema APPROVED by owner 2026-07-19 (docs/decisions.md); architect review
+  of migrations + Webull client wrapper started. Next: Supabase dev project (needs owner's
+  Supabase account — or Docker + Supabase CLI for local) + apply migrations; Pydantic models
+  mirroring schema.
+- **Known issues / debt:** Backend verified locally (Python 3.12.10, venv, pytest/ruff/mypy
+  green). Webull paper credentials in backend/.env (rotated by owner). No Supabase project
+  yet; supabase CLI + Docker not installed. No PRD beyond research files. Safety "never"
+  rules exist only as prompts — must become PreToolUse hooks / permissions.deny before live
+  trading. app_owner table must be populated with Esther's Supabase Auth UID per environment
+  or all RLS denies (fail-closed).
 
 ## Agent Instructions
 

@@ -9,6 +9,14 @@ moving code outside sync. Mitigation: `.gitignore` excludes `node_modules/`, `.v
 caches, and build output so OneDrive never syncs dependency trees. Revisit only if sync
 contention actually bites.
 
+## 2026-07-19 — Initial audit-table shapes APPROVED by owner
+
+Esther approved the initial schema as written (migrations 000001–000011), including the
+three escalated decisions: settings born frozen with caps=0.00, the decisions.action enum,
+and orders status/type enums with previous_order_id chaining for transitions. Approval
+covers the shape as of commit 6edfa0e; any future change to these tables re-triggers the
+owner-approval requirement per CLAUDE.md.
+
 ## 2026-07-19 — Frontend deferred until first API routes exist
 
 Frontend build starts after `GET /positions`, `GET /decisions`, `GET/PATCH /settings`
