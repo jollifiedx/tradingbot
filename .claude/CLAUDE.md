@@ -70,12 +70,18 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   verified LIVE on sandbox (get_account_list→200, 5 accounts; balance parsed). DB-access
   layer (db.py: asyncpg pool + lifespan + get_settings/get_decisions/get_latest_equity_
   snapshot/update_settings, fail-closed). app_owner populated with Esther's Auth UID.
-- **In progress:** First dashboard API routes (orchestrator plan a3e1…): auth chosen =
-  app_owner allowlist + FastAPI JWT owner check (service_role bypasses RLS, so API enforces).
-  PATCH /settings IN scope (owner-approved). Next: auth middleware → GET /settings,/decisions,
-  /account → PATCH /settings (execution-guardian + architect) → wire main.py + drift review →
-  frontend-engineer api-client-regen. GET /positions DEFERRED (no DB source; Invariant 2).
-- **Known issues / debt:** Backend verified locally (Python 3.12.10, 74 tests green). Webull
+  Dashboard API COMPLETE (7169ded): single-owner auth gate (deps.py — Supabase JWT
+  introspection + app_owner check, 401/403/503 fail-closed); GET /settings,/decisions,
+  /account + PATCH /settings (freeze/cap write, architect-approved). Money string-typed
+  through OpenAPI. 93 tests green, mypy strict clean.
+- **In progress:** Nothing active. Next: frontend can now begin — frontend-engineer runs
+  api-client-regen against the real OpenAPI spec, then first screen (freeze toggle + settings
+  + decision log). GET /positions DEFERRED (no DB source; Invariant 2 — needs worker→DB
+  positions snapshot first).
+- **Known issues / debt:** Pre-live API follow-ups (non-blocking, per architect): add a
+  rolled-back live-DB integration test for update_settings (coalesce + history trigger);
+  optional float-rejecting validator on money PATCH input; PATCH gate-503 test for symmetry.
+  Backend verified locally (Python 3.12.10, 93 tests green). Webull
   paper creds + Supabase keys in backend/.env. supabase CLI + Docker not installed (migrations
   via asyncpg script). Webull follow-ups: buying_power/settled_funds nested under
   account_currency_assets parse to None (BLOCKS cap logic until confirmed); get_order_status
