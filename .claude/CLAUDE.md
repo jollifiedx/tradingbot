@@ -95,10 +95,19 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   DRIFT=sticky/owner-clears, TRANSIENT=may auto-clear, NOT_VERIFIED=resolves structurally.
   db.get_open_position_intents() (long-only, guarded by a no-`side`-column tripwire test).
   260 tests green.
-- **In progress:** Nothing active. Next candidates: (1) worker scheduler (APScheduler +
-  exchange_calendars) — **OWNS THE LATCH RULE**: a DRIFT result must stay sticky across runs
-  AND restarts, cleared only by the owner via the freeze flag; needs a test proving
-  DRIFT-then-CLEAN does NOT re-enable trading. (2) market-data stream + staleness heartbeat
+- **PARKED OWNER DECISION (do not decide by default):** strategy timeframe + holding period.
+  Nothing in the code commits to one yet. Options put to Esther 2026-07-21: intraday/day
+  trading (5–15m bars, flat by close — matches the original vision, but highest cost drag and
+  slowest to validate); swing (daily/hourly bars, hold days–weeks — far less cost drag, easier
+  to prove vs SPY, fits an owner who is at work); or hybrid (daily picks what, intraday refines
+  when). Esther parked it until the scheduler is done; it must be ruled on BEFORE the rules
+  engine is built. Note: bar timeframe and holding period are independent choices.
+- **In progress:** Halt latch COMPLETE (5a4c4c6, pure decide_posture(); 30 tests incl. the
+  required drift-then-clean and restart cases) — ARCHITECT REVIEW PENDING (agent infra stalled
+  3x; latch is imported nowhere, so no live exposure). Remaining scheduler work: APScheduler +
+  exchange_calendars wiring + worker lifecycle that APPLIES the latch decision (persist
+  engage_freeze, never cache the frozen flag, never write frozen=false).
+  Next after that: (2) market-data stream + staleness heartbeat
   (feeds the gate's seconds_since_tick); (3) first rules-engine strategy + backtest;
   (4) order path that WIRES the safety gate; (5) TOTP 2FA enrollment; (6) deploy (owner-gated).
   GET /positions still DEFERRED (needs worker→DB positions snapshot; Invariant 2).
