@@ -1,1 +1,3 @@
 - [Drift: non-finite inputs in fail-closed guards](drift_nonfinite_inputs.md) — NaN/Inf can slip through `>`/`>=` comparisons as "safe"; grep money/staleness guards for finiteness checks.
+- [Drift: signed vs magnitude inputs](drift_signed_magnitude_inputs.md) — a "loss magnitude" taken as a bare Decimal inverts silently if the caller passes signed P&L.
+- [Drift: partial verification + missing halt latch](drift_partial_verification_and_latch.md) — "clean" with a skipped leg consumed as a bare bool; stateless halts that auto-resume.

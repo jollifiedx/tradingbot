@@ -182,6 +182,56 @@ class Database:
             return None
         return EquitySnapshot.model_validate(dict(row))
 
+    async def get_open_position_intents(
+        self, *, is_paper: bool = True
+    ) -> dict[str, Decimal]:
+        """Symbol -> quantity the DB's *intent* record says we currently hold.
+
+        This is the DB side of reconciliation (CLAUDE.md invariant #6: the DB is
+        the source of truth for intent, Webull for reality). It is derived from
+        `trades`, which is the app's own record of positions opened by the
+        audited decision -> order -> trade chain: a trade row is `open` from the
+        moment its entry order filled until its exit order fills, so the open
+        rows ARE the positions we believe we are holding.
+
+        Today this legitimately returns `{}` -- no order path exists yet, so no
+        trades have ever been written. That empty result is a real answer ("we
+        intend to hold nothing"), NOT a failure, and is distinct from
+        :class:`DatabaseError` on connection/query failure (fail closed).
+
+        `is_paper` scopes the query to one environment's trades, so a paper
+        broker account is never reconciled against live rows (or vice versa).
+        Callers derive it from the client's environment, never hardcode it.
+
+        LIMITATION to revisit when the order path lands: `trades.quantity` is
+        constrained positive and the table carries no side column, so this
+        models LONG positions only. If short selling is ever added, this query
+        must sign the quantity by side -- otherwise a short would reconcile as a
+        long of the same size. That is a safety change, not a refactor.
+        """
+        try:
+            rows = await self._pool.fetch(
+                """
+                select symbol, sum(quantity) as quantity
+                from trades
+                where status = 'open' and is_paper = $1
+                group by symbol
+                order by symbol
+                """,
+                is_paper,
+            )
+        except _DB_FAILURE_TYPES as exc:
+            raise DatabaseError("failed to read open trades") from exc
+        intents: dict[str, Decimal] = {}
+        for row in rows:
+            quantity = row["quantity"]
+            if quantity is None:
+                # Cannot happen with a NOT NULL column, but never substitute a
+                # fabricated zero for a quantity we could not read.
+                raise DatabaseError("open trade returned a null quantity")
+            intents[str(row["symbol"])] = Decimal(quantity)
+        return intents
+
     async def is_owner(self, user_id: UUID) -> bool:
         """True if `user_id` is the single allowlisted owner (`app_owner`).
 

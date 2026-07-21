@@ -304,6 +304,110 @@ async def test_insert_equity_snapshot_null_buying_power_fails_closed(tx: _Tx) ->
 
 
 # --------------------------------------------------------------------------
+# get_open_position_intents (the DB side of reconciliation, invariant #6)
+# --------------------------------------------------------------------------
+
+
+async def _insert_open_trade(
+    tx: _Tx, *, symbol: str, quantity: str, status: str = "open", is_paper: bool = True
+) -> None:
+    """Insert a synthetic decision -> order -> trade chain (rolled back after)."""
+    decision_id = await tx.conn.fetchval(
+        """
+        insert into decisions (decided_at, symbol, action, rules_fired)
+        values ($1, $2, 'buy', $3) returning id
+        """,
+        datetime(2099, 1, 1, tzinfo=UTC),
+        symbol,
+        [{"rule": "synthetic"}],
+    )
+    order_id = await tx.conn.fetchval(
+        """
+        insert into orders
+            (client_order_id, decision_id, symbol, side, order_type, status,
+             quantity, is_paper)
+        values ($1, $2, $3, 'buy', 'market', 'filled', $4, $5) returning id
+        """,
+        f"ZTEST-{uuid4()}",
+        decision_id,
+        symbol,
+        Decimal(quantity),
+        is_paper,
+    )
+    await tx.conn.execute(
+        """
+        insert into trades
+            (symbol, entry_order_id, quantity, entry_price, entry_at, status,
+             is_paper)
+        values ($1, $2, $3, 1.0000, $4, $5, $6)
+        """,
+        symbol,
+        order_id,
+        Decimal(quantity),
+        datetime(2099, 1, 1, tzinfo=UTC),
+        status,
+        is_paper,
+    )
+
+
+async def test_get_open_position_intents_empty_today(tx: _Tx) -> None:
+    # No order path exists yet, so the DB legitimately intends no positions.
+    # An empty dict is a real answer ("flat"), never an error.
+    assert await tx.db.get_open_position_intents() == {}
+
+
+async def test_get_open_position_intents_returns_open_trades_only(tx: _Tx) -> None:
+    await _insert_open_trade(tx, symbol="ZTEST_OPEN", quantity="10.500000")
+    await _insert_open_trade(
+        tx, symbol="ZTEST_CLOSED", quantity="4.000000", status="closed"
+    )
+
+    intents = await tx.db.get_open_position_intents()
+
+    assert intents["ZTEST_OPEN"] == Decimal("10.500000")
+    assert "ZTEST_CLOSED" not in intents  # closed trades are not open positions
+
+
+async def test_get_open_position_intents_sums_same_symbol(tx: _Tx) -> None:
+    await _insert_open_trade(tx, symbol="ZTEST_SUM", quantity="3.000000")
+    await _insert_open_trade(tx, symbol="ZTEST_SUM", quantity="2.000000")
+
+    intents = await tx.db.get_open_position_intents()
+
+    # One entry per symbol -- reconciliation compares per symbol, and a dict
+    # cannot represent two rows for one symbol without silently dropping one.
+    assert intents["ZTEST_SUM"] == Decimal("5.000000")
+
+
+async def test_trades_has_no_side_column_long_only_tripwire(tx: _Tx) -> None:
+    # DRIFT GUARD (architect N4). get_open_position_intents() sums trades.quantity
+    # with no regard for direction, which is only correct because `trades` models
+    # long entries exclusively (quantity is constrained positive, no side column).
+    # If a side column is ever added, reconciliation would silently treat a short
+    # as a long of the same size -- so adding one must break this test and force
+    # the query to be signed first.
+    columns = {
+        row["column_name"]
+        for row in await tx.conn.fetch(
+            """
+            select column_name from information_schema.columns
+            where table_schema = 'public' and table_name = 'trades'
+            """
+        )
+    }
+    assert columns, "trades table not found"
+    assert "side" not in columns
+    assert "direction" not in columns
+
+
+async def test_get_open_position_intents_scopes_to_environment(tx: _Tx) -> None:
+    await _insert_open_trade(tx, symbol="ZTEST_LIVE", quantity="1.000000", is_paper=False)
+
+    assert "ZTEST_LIVE" not in await tx.db.get_open_position_intents(is_paper=True)
+    assert "ZTEST_LIVE" in await tx.db.get_open_position_intents(is_paper=False)
+
+
+# --------------------------------------------------------------------------
 # DatabaseError translation (mocked pool -- no DB needed).
 # --------------------------------------------------------------------------
 
@@ -334,6 +438,14 @@ async def test_get_latest_equity_snapshot_wraps_failure_as_database_error() -> N
     db = Database(_RaisingPool())  # type: ignore[arg-type]
     with pytest.raises(DatabaseError):
         await db.get_latest_equity_snapshot()
+
+
+async def test_get_open_position_intents_wraps_failure_as_database_error() -> None:
+    # Reconciliation turns this into DB_UNREADABLE (not reconciled) -- it must
+    # never surface as "no open positions".
+    db = Database(_RaisingPool())  # type: ignore[arg-type]
+    with pytest.raises(DatabaseError):
+        await db.get_open_position_intents()
 
 
 async def test_update_settings_wraps_failure_as_database_error() -> None:

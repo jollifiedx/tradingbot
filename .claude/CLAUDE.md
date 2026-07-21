@@ -87,16 +87,30 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   None AND non-finite inputs; priority ladder SETTINGS_UNREADABLE→FROZEN→UNRECONCILED→
   STALE_DATA→DAILY_LOSS→PER_TRADE_CAP→BUY_POWER_CAP. Imported nowhere yet (built ahead of the
   order path). 157 tests green.
-- **In progress:** Nothing active. Next candidates: (1) reconciliation at worker startup
-  (Invariant 6 — read Webull positions/cash, halt on mismatch); (2) market-data stream +
-  staleness heartbeat (feeds the gate's seconds_since_tick); (3) worker scheduler
-  (APScheduler + exchange_calendars); (4) first rules-engine strategy + backtest;
-  (5) order path that WIRES the safety gate; (6) TOTP 2FA enrollment; (7) deploy (owner-gated).
+  Reconciliation COMPLETE (Invariant 6, architect-approved after 2 review rounds): pure
+  compare_positions() + non-mutating async reconcile() on the PINNED account
+  (WEBULL_ACCOUNT_ID, set to a CASH sandbox account). Owner rulings (docs/decisions.md
+  2026-07-21): cash-unchecked ⇒ status CASH_NOT_VERIFIED + reconciled=False (structural —
+  `reconciled` is derived, __post_init__ blocks inconsistent states); HaltCategory
+  DRIFT=sticky/owner-clears, TRANSIENT=may auto-clear, NOT_VERIFIED=resolves structurally.
+  db.get_open_position_intents() (long-only, guarded by a no-`side`-column tripwire test).
+  260 tests green.
+- **In progress:** Nothing active. Next candidates: (1) worker scheduler (APScheduler +
+  exchange_calendars) — **OWNS THE LATCH RULE**: a DRIFT result must stay sticky across runs
+  AND restarts, cleared only by the owner via the freeze flag; needs a test proving
+  DRIFT-then-CLEAN does NOT re-enable trading. (2) market-data stream + staleness heartbeat
+  (feeds the gate's seconds_since_tick); (3) first rules-engine strategy + backtest;
+  (4) order path that WIRES the safety gate; (5) TOTP 2FA enrollment; (6) deploy (owner-gated).
   GET /positions still DEFERRED (needs worker→DB positions snapshot; Invariant 2).
-- **Known issues / debt:** WIRING-TIME safety req for the order path (per architect, safety_gate
-  N1): loss_so_far is a POSITIVE-magnitude convention (positive = down money) — the order-path
-  caller MUST pin the sign with an end-to-end test where a real loss fires DAILY_LOSS, else a
-  drawdown could read as profit under the cap. Gate also needs its data sources wired:
+- **Known issues / debt:** tests/test_db.py hits the LIVE dev DB — not safe to run concurrently
+  (two pytest processes at once cause spurious failures); serialize before CI parallelizes.
+  Reconciliation gaps (documented, pre-live): cash leg unverifiable until a DB cash ledger
+  exists; open-orders-by-client_order_id leg not built (needs the order path); zero-quantity
+  broker positions halt — validate against real paper data before scheduling. WIRING-TIME
+  safety req for the order path (per architect, safety_gate N1): loss_so_far is a
+  POSITIVE-magnitude convention (positive = down money) — the order-path caller MUST pin the
+  sign with an end-to-end test where a real loss fires DAILY_LOSS, else a drawdown could read
+  as profit under the cap. Gate also needs its data sources wired:
   settings re-read before EVERY order (None→deny), deployed_capital + buying_power (positions
   source), seconds_since_tick (market-data stream), reconciled flag (reconciliation).
   Minor: architect memory landed in backend/.claude/agent-memory (should be top-level
