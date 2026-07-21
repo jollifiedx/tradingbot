@@ -8,6 +8,7 @@ the fail-closed edges.
 
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 
 import pytest
@@ -118,11 +119,51 @@ def test_drift_survives_a_restart() -> None:
     assert after_restart.reason is LatchReason.FROZEN
 
 
+def test_drift_is_still_latched_when_settings_are_unreadable() -> None:
+    """Architect B1: an observed drift must never be silently discarded.
+
+    If the settings row can't be read we halt for THAT reason -- but the drift
+    we just saw still has to be persisted, or the next run reads clean and
+    trading resumes with nobody ever acknowledging the disagreement.
+    """
+    decision = decide_posture(result=_drift(), currently_frozen=None)
+    assert decision.may_trade is False
+    assert decision.engage_freeze is True, "drift observed must still latch"
+    assert decision.reason is LatchReason.SETTINGS_UNREADABLE
+
+
+def test_drift_is_still_latched_when_already_frozen() -> None:
+    """Architect B1: drift seen during an owner freeze must still be recorded.
+
+    Otherwise: owner freezes at 08:50 for their own reasons, the worker sees
+    drift at 08:55 and writes nothing, owner unfreezes at 09:00 believing they
+    are clearing only their own freeze -- and the drift is gone.
+    """
+    decision = decide_posture(result=_drift(), currently_frozen=True)
+    assert decision.may_trade is False
+    assert decision.engage_freeze is True, "drift observed must still latch"
+    assert decision.reason is LatchReason.FROZEN
+
+
+@pytest.mark.parametrize("falsy", [0, "", [], 0.0, Decimal("0")])
+def test_non_bool_falsy_frozen_flag_halts(falsy: object) -> None:
+    """Architect D1: identity, not truthiness.
+
+    `BotSettings.frozen` is a real bool today, but a caller that hand-rolls the
+    value from a cached dict or raw row is one careless line away. Anything that
+    is not exactly False must halt.
+    """
+    decision = decide_posture(result=_clean(), currently_frozen=falsy)  # type: ignore[arg-type]
+    assert decision.may_trade is False
+    assert decision.reason is LatchReason.FROZEN
+
+
 def test_transient_then_clean_does_clear() -> None:
     """A blip halts without freezing, so a later clean run resumes."""
     blip = decide_posture(result=_transient(), currently_frozen=False)
     assert blip.may_trade is False
     assert blip.engage_freeze is False, "a transient failure must not latch"
+    assert blip.reason is LatchReason.TRANSIENT_HALT
 
     recovered = decide_posture(result=_clean(), currently_frozen=False)
     assert recovered.may_trade is True
@@ -182,9 +223,38 @@ def test_never_raises_and_never_unfreezes(
     """
     decision = decide_posture(result=result, currently_frozen=frozen)
     assert isinstance(decision, LatchDecision)
-    assert not hasattr(decision, "release_freeze")
-    assert not hasattr(decision, "clear_freeze")
-    assert not hasattr(decision, "unfreeze")
+
+
+def test_decision_surface_cannot_grow_a_release_field() -> None:
+    """A real tripwire, not a hardcoded name check (architect N2).
+
+    Pinning the exact field set means ANY future field -- `clear_latch`,
+    `resume`, `frozen_override` -- breaks this test and forces a deliberate
+    conversation. The worker must only ever be able to ENGAGE a safety
+    mechanism, never release one.
+    """
+    assert {f.name for f in dataclasses.fields(LatchDecision)} == {
+        "may_trade",
+        "engage_freeze",
+        "reason",
+    }
+
+
+def test_defensive_fallthrough_halts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The unreachable-by-construction branch still fails closed (architect N3).
+
+    A stand-in whose category is NONE but which is not reconciled cannot be
+    built from the real class; duck-type it to prove the fall-through halts
+    rather than dropping into the permit branch.
+    """
+
+    class _Impossible:
+        category = HaltCategory.NONE
+        reconciled = False
+
+    decision = decide_posture(result=_Impossible(), currently_frozen=False)  # type: ignore[arg-type]
+    assert decision.may_trade is False
+    assert decision.reason is LatchReason.TRANSIENT_HALT
 
 
 @pytest.mark.parametrize("frozen", [True, None])
@@ -204,5 +274,14 @@ def test_only_drift_ever_engages_the_freeze() -> None:
 def test_decision_rejects_incoherent_construction() -> None:
     with pytest.raises(ValueError, match="permit trading and freeze"):
         LatchDecision(may_trade=True, engage_freeze=True, reason=LatchReason.CLEAR)
-    with pytest.raises(ValueError, match="only for LatchReason.CLEAR"):
+    with pytest.raises(ValueError, match="exactly when the reason is CLEAR"):
         LatchDecision(may_trade=True, engage_freeze=False, reason=LatchReason.FROZEN)
+    # The converse (architect N1): a CLEAR reason that does NOT permit trading
+    # is equally incoherent, and would fail open for a caller that gates on
+    # `reason` rather than `may_trade`.
+    with pytest.raises(ValueError, match="exactly when the reason is CLEAR"):
+        LatchDecision(may_trade=False, engage_freeze=False, reason=LatchReason.CLEAR)
+    # Legal and load-bearing: drift latched while halting for another reason.
+    assert LatchDecision(
+        may_trade=False, engage_freeze=True, reason=LatchReason.FROZEN
+    ).engage_freeze is True

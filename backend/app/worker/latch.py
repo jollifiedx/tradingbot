@@ -70,22 +70,22 @@ class LatchDecision:
     reason: LatchReason
 
     def __post_init__(self) -> None:
-        """Reject any decision that both permits trading and self-halts."""
+        """Reject internally incoherent decisions at construction time.
+
+        The second check is a biconditional on purpose: trading is permitted
+        exactly when the reason is CLEAR, and never otherwise. A caller that
+        (wrongly) gates on ``reason`` instead of ``may_trade`` therefore cannot
+        be handed a decision where the two disagree.
+
+        Note that ``engage_freeze=True`` with a reason of FROZEN or
+        SETTINGS_UNREADABLE is legal and load-bearing -- see
+        :func:`decide_posture`: an observed drift must still be persisted even
+        when the halt is being reported for a different reason.
+        """
         if self.may_trade and self.engage_freeze:
             raise ValueError("a decision cannot permit trading and freeze at once")
-        if self.may_trade and self.reason is not LatchReason.CLEAR:
-            raise ValueError("trading is permitted only for LatchReason.CLEAR")
-
-
-_HALTED_ONLY = frozenset(
-    {
-        LatchReason.FROZEN,
-        LatchReason.SETTINGS_UNREADABLE,
-        LatchReason.NO_RECONCILIATION,
-        LatchReason.TRANSIENT_HALT,
-        LatchReason.CASH_NOT_VERIFIED,
-    }
-)
+        if self.may_trade is not (self.reason is LatchReason.CLEAR):
+            raise ValueError("may_trade is true exactly when the reason is CLEAR")
 
 
 def decide_posture(
@@ -113,15 +113,25 @@ def decide_posture(
 
     Pure: no I/O, no clock, no DB. Never raises on any combination of inputs.
     """
+    # The latch bit is computed FIRST and independently of *why* we halt. If a
+    # run observed real drift, that observation must be persisted even when the
+    # halt is reported for a different reason (settings unreadable, or already
+    # frozen). Folding it into the reason ladder would discard the evidence: the
+    # next run reads clean, and trading silently resumes -- the exact
+    # auto-recovery the owner ruled against on 2026-07-21.
+    engage = result is not None and result.category is HaltCategory.DRIFT
+
     if currently_frozen is None:
         return LatchDecision(
             may_trade=False,
-            engage_freeze=False,
+            engage_freeze=engage,
             reason=LatchReason.SETTINGS_UNREADABLE,
         )
-    if currently_frozen:
+    # Identity, not truthiness: any non-``False`` value (including a non-bool
+    # falsy one from a hand-rolled caller) must halt, never permit.
+    if currently_frozen is not False:
         return LatchDecision(
-            may_trade=False, engage_freeze=False, reason=LatchReason.FROZEN
+            may_trade=False, engage_freeze=engage, reason=LatchReason.FROZEN
         )
     if result is None:
         return LatchDecision(
