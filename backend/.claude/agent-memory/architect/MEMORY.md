@@ -1,0 +1,1 @@
+- [Drift: non-finite inputs in fail-closed guards](drift_nonfinite_inputs.md) — NaN/Inf can slip through `>`/`>=` comparisons as "safe"; grep money/staleness guards for finiteness checks.
