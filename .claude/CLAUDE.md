@@ -81,15 +81,28 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   boots live (backend uvicorn + vite) — login screen renders, no console errors, /settings
   401 unauth. NOT yet done: authenticated login→freeze flow (needs owner's password — owner
   tests). Dev run: backend `uvicorn app.api.main:app --port 8000`; frontend `npm run dev`.
-- **In progress:** Nothing active. Next candidates: (1) owner does live login+freeze test;
-  (2) TOTP 2FA enrollment flow (login is password-only; CLAUDE.md wants mandatory 2FA);
-  (3) worker safety gate + reconciliation (the heart); (4) deploy (Vercel+Railway) to make
-  the dashboard phone-accessible — owner-gated. GET /positions still DEFERRED (needs worker→DB
-  positions snapshot first; Invariant 2).
-- **Known issues / debt:** Pre-live API follow-ups (non-blocking, per architect): add a
-  rolled-back live-DB integration test for update_settings (coalesce + history trigger);
-  optional float-rejecting validator on money PATCH input; PATCH gate-503 test for symmetry.
-  Backend verified locally (Python 3.12.10, 93 tests green). Webull
+  Worker equity-snapshot job (snapshot.py) verified live (dashboard Account panel shows real
+  paper numbers). buying_power nested-parse RESOLVED. Pre-order safety gate COMPLETE (f7eb3cd,
+  architect-approved after a fail-open fix): pure evaluate_order_safety() — fail-closed on
+  None AND non-finite inputs; priority ladder SETTINGS_UNREADABLE→FROZEN→UNRECONCILED→
+  STALE_DATA→DAILY_LOSS→PER_TRADE_CAP→BUY_POWER_CAP. Imported nowhere yet (built ahead of the
+  order path). 157 tests green.
+- **In progress:** Nothing active. Next candidates: (1) reconciliation at worker startup
+  (Invariant 6 — read Webull positions/cash, halt on mismatch); (2) market-data stream +
+  staleness heartbeat (feeds the gate's seconds_since_tick); (3) worker scheduler
+  (APScheduler + exchange_calendars); (4) first rules-engine strategy + backtest;
+  (5) order path that WIRES the safety gate; (6) TOTP 2FA enrollment; (7) deploy (owner-gated).
+  GET /positions still DEFERRED (needs worker→DB positions snapshot; Invariant 2).
+- **Known issues / debt:** WIRING-TIME safety req for the order path (per architect, safety_gate
+  N1): loss_so_far is a POSITIVE-magnitude convention (positive = down money) — the order-path
+  caller MUST pin the sign with an end-to-end test where a real loss fires DAILY_LOSS, else a
+  drawdown could read as profit under the cap. Gate also needs its data sources wired:
+  settings re-read before EVERY order (None→deny), deployed_capital + buying_power (positions
+  source), seconds_since_tick (market-data stream), reconciled flag (reconciliation).
+  Minor: architect memory landed in backend/.claude/agent-memory (should be top-level
+  .claude/) — tidy later. Pre-live API follow-ups (non-blocking): rolled-back live-DB test for
+  update_settings; optional float-rejecting validator on money PATCH; PATCH gate-503 test.
+  Backend verified locally (Python 3.12.10, 157 tests green). Webull
   paper creds + Supabase keys in backend/.env. supabase CLI + Docker not installed (migrations
   via asyncpg script). Webull follow-ups: buying_power/settled_funds nested under
   account_currency_assets parse to None (BLOCKS cap logic until confirmed); get_order_status
