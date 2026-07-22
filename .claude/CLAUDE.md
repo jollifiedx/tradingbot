@@ -102,15 +102,22 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   to prove vs SPY, fits an owner who is at work); or hybrid (daily picks what, intraday refines
   when). Esther parked it until the scheduler is done; it must be ruled on BEFORE the rules
   engine is built. Note: bar timeframe and holding period are independent choices.
-- **In progress:** Halt latch COMPLETE (5a4c4c6, pure decide_posture(); 30 tests incl. the
-  required drift-then-clean and restart cases) — ARCHITECT REVIEW PENDING (agent infra stalled
-  3x; latch is imported nowhere, so no live exposure). Remaining scheduler work: APScheduler +
-  exchange_calendars wiring + worker lifecycle that APPLIES the latch decision (persist
-  engage_freeze, never cache the frozen flag, never write frozen=false).
-  Next after that: (2) market-data stream + staleness heartbeat
-  (feeds the gate's seconds_since_tick); (3) first rules-engine strategy + backtest;
-  (4) order path that WIRES the safety gate; (5) TOTP 2FA enrollment; (6) deploy (owner-gated).
-  GET /positions still DEFERRED (needs worker→DB positions snapshot; Invariant 2).
+  Halt latch + worker SCHEDULER COMPLETE (4dda1c5, architect-approved after 3 review rounds):
+  pure decide_posture(); lifecycle born HALTED→config→settings→reconcile→tick; APScheduler +
+  exchange_calendars (sole market-hours authority); posture/reconcile/snapshot jobs. All 11
+  defeat-list items are mechanism with a regression test each, incl. the system-level
+  DRIFT-then-CLEAN test (long-standing CLAUDE.md requirement, now DISCHARGED). Worker
+  self-freezes via engage_system_freeze; freeze_write_pending debt retried and never cleared by
+  a clean run; verdicts EXPIRE (2× posture interval) so a starved tick can't keep publishing
+  yes; latch defects stick process-lifetime as LATCH_ERROR. 386 tests green.
+- **In progress:** Nothing active. Next: (1) market-data stream + staleness heartbeat (feeds the
+  gate's seconds_since_tick); (2) first rules-engine strategy + backtest — BLOCKED on the parked
+  strategy-timeframe ruling; (3) order path that WIRES the safety gate — its five hard
+  requirements are enumerated in scheduler.py's start() docstring (fresh get_settings per order,
+  may_trade at submission, gate wired incl. the loss_so_far sign test, + 2 end-to-end refusal
+  tests); (4) TOTP 2FA enrollment; (5) deploy (owner-gated). GET /positions still DEFERRED.
+  NOTE: may_trade is permanently False today and that is CORRECT — it needs cash_checked, which
+  needs a DB cash ledger, which the order path brings. Do not "fix" it to look healthy.
 - **Known issues / debt:** OPEN owner items from architect review of c5b56c1: (1) CLAUDE.md
   Invariant 2 still reads "worker reads settings" but the worker now WRITES frozen=true
   (owner-approved 2026-07-21) — the invariant text needs Esther's wording; (2) TRUNCATE
