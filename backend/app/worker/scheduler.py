@@ -183,11 +183,12 @@ class MarketCalendar(Protocol):
 class SchedulerConfig:
     """Timings for the worker's jobs. All seconds, all positive.
 
-    ``reconcile_interval_seconds`` does double duty on purpose: it is both how
-    often reconciliation runs and the age at which a stored result stops
-    counting (see :meth:`WorkerState.fresh_result`). Tying them together means
-    a skipped, misfired or failed reconcile cannot leave a result that still
-    looks fresh -- the worker simply loses its opinion and halts.
+    ``reconcile_interval_seconds`` does double duty on purpose: it sets how
+    often reconciliation runs AND anchors the age at which a stored result stops
+    counting (:attr:`result_max_age` = this interval plus the misfire grace; see
+    that property for why the grace is added). Tying them together means a
+    skipped, misfired or failed reconcile cannot leave a result that still looks
+    fresh -- the worker simply loses its opinion and halts.
     """
 
     __slots__ = (
@@ -396,10 +397,14 @@ class WorkerState:
         that took 90 seconds describes a 90-second-old world, and dating it from
         completion would make it look fresher than it is.
 
-        Reconciliation runs outside the state lock, so two runs can finish out
-        of order. An OLDER successful result never overwrites a newer one; a
-        ``None`` always applies, because clearing is the fail-closed direction
-        and losing evidence can only ever halt us.
+        Defensive: reconciliation currently runs UNDER the state lock, so
+        out-of-order completion is unreachable today. The ordering guard exists
+        so that moving the await out of the lock stays a one-line change rather
+        than a correctness question (architect D-4 -- an earlier draft of this
+        docstring claimed the move had already happened). An OLDER successful
+        result never overwrites a newer one; a ``None`` always applies, because
+        clearing is the fail-closed direction and losing evidence can only ever
+        halt us.
         """
         if result is None:
             self._result = None
@@ -533,11 +538,21 @@ class Worker:
         """Run startup, build the scheduler, register jobs, start it.
 
         Trading jobs are registered only if the startup tick came back CLEAR.
-        That is a *second* gate, not the primary one: the primary gate is that
-        every order must consult :attr:`WorkerState.may_trade`, which the
-        posture tick keeps current. A worker that starts clean and is frozen at
-        11:00 still has its trading jobs registered -- they just must not place
-        anything.
+        That is a *second* gate. :attr:`WorkerState.may_trade` is NECESSARY
+        and NEVER SUFFICIENT: it is a cached verdict, and Invariant 2 requires
+        reading `settings` fresh before EVERY order. The age bound narrows the
+        window in which a cached yes can outlive an owner freeze; it does not
+        remove it (architect D-3 -- probed at up to one posture interval).
+
+        The order path, when it exists, MUST carry all of:
+        1. a fresh ``get_settings()`` immediately before each submission,
+           ``None`` -> deny;
+        2. ``WorkerState.may_trade`` checked at submission time;
+        3. ``evaluate_order_safety()`` wired with its documented inputs,
+           including the ``loss_so_far`` positive-magnitude sign test;
+        4. an end-to-end test where the owner freezes mid-session and the next
+           ORDER ATTEMPT is refused -- not merely the next tick's log line;
+        5. the same test with the posture tick starved.
         """
         await self.startup()
         scheduler = self.build_scheduler()
@@ -629,8 +644,9 @@ class Worker:
         2. Re-read `settings` from the database. EVERY tick, no exceptions, no
            cache. This is how an owner freeze mid-session is seen, and how the
            worker sees the freeze it wrote itself.
-        3. Take the reconciliation result only if it is younger than the
-           reconcile interval; otherwise ``None``.
+        3. Take the reconciliation result only if it is younger than
+           :attr:`SchedulerConfig.result_max_age` (the reconcile interval plus
+           the misfire grace); otherwise ``None``.
         4. Ask the latch. Consume only its decision.
         5. Persist the freeze if it asked for one.
         """
@@ -875,6 +891,11 @@ class Worker:
             "latch_may_trade": decision.may_trade,
             "reason": decision.reason.value,
             "freeze_write_pending": self._state.freeze_write_pending,
+            # Architect N-C: a postmortem must be able to read "the verdict was
+            # four minutes old" without inferring it from timestamps, and must
+            # be able to tell a latch defect from a market event at a glance.
+            "latch_error": self._state.latch_error,
+            "decision_is_current": self._state.decision_is_current,
             "reconciliation_available": reconciliation_available,
         }
         if may_trade:
@@ -919,6 +940,13 @@ def _within(now: datetime, at: datetime | None, max_age: timedelta) -> bool:
     must read as no opinion, never as recent.
     """
     if at is None:
+        return False
+    # A naive stamp cannot be compared to an aware one -- subtracting them
+    # raises TypeError, and this helper is reached from inside both `may_trade`
+    # and the "a tick never raises" guarantee. Refusing to guess costs one
+    # halted tick; guessing costs the guarantee. (Architect N-A: an earlier
+    # version had this guard and the rewrite dropped it.)
+    if at.tzinfo is None or now.tzinfo is None:
         return False
     age = now - at
     return timedelta(0) <= age <= max_age

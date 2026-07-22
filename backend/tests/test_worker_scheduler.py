@@ -1330,3 +1330,20 @@ async def test_a_latch_defect_is_reported_distinctly_and_writes_no_freeze() -> N
     reasons = {entry.get("halt_reason") for entry in logs}
     assert HALT_REASON_LATCH_ERROR in reasons
     assert store.freeze_writes == 0, "a code defect must not write a freeze"
+
+
+async def test_a_naive_clock_is_never_treated_as_fresh() -> None:
+    """Architect N-A: refusing to guess costs one halted tick.
+
+    A naive stamp cannot be subtracted from an aware one -- it raises TypeError,
+    and this path sits inside both `may_trade` and the "a tick never raises"
+    guarantee. An earlier version had this guard; a rewrite dropped it and no
+    test noticed, which is why it is pinned here now.
+    """
+    worker, _, reconciler, clock = _build()
+    reconciler.result = _clean()
+    await worker.run_reconcile()
+
+    naive = datetime(2026, 7, 21, 15, 0)  # noqa: DTZ001 -- the case under test
+
+    assert worker.state.fresh_result(naive) is None, "a naive clock is not evidence"

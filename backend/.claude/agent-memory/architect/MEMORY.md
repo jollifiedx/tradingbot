@@ -3,3 +3,4 @@
 - [Drift: partial verification + missing halt latch](drift_partial_verification_and_latch.md) — "clean" with a skipped leg consumed as a bare bool; stateless halts that auto-resume.
 - [Drift: stale cached verdict](drift_stale_verdict.md) — inputs age out but the published permission does not; check what happens when the refresher stops.
 - [Reviewing AST tripwire tests](review_ast_tripwires.md) — run the test's own predicate against bypass shapes before crediting it as a guard.
+- [Re-reviewing a fix that was a rewrite](review_fix_rewrites.md) — untested guards vanish silently; docstrings describe refactors that were abandoned.
