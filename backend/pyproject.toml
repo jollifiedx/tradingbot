@@ -68,6 +68,15 @@ ignore_missing_imports = true
 module = ["asyncpg.*"]
 ignore_missing_imports = true
 
+# Neither APScheduler nor exchange_calendars ships a py.typed marker. Scoped the
+# same way as webull.*/asyncpg.* rather than relaxing strict mode globally. All
+# access is confined to app/worker/scheduler.py and app/worker/market_hours.py,
+# and every value that leaves the calendar wrapper is isinstance-checked before
+# it is used (see market_hours._as_aware_datetime).
+[[tool.mypy.overrides]]
+module = ["apscheduler.*", "exchange_calendars.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

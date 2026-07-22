@@ -29,6 +29,18 @@ paying for the mechanism now even when it "costs nothing today".
 - Watch for observations dropped by an early-return ladder: a higher-priority halt reason
   returning before a lower-priority *latching* side effect is computed loses the latch.
   (Seen in `app/worker/latch.py`: DRIFT observed while settings were unreadable, or while
-  already frozen, returned `engage_freeze=False` — the drift was never persisted.)
+  already frozen, returned `engage_freeze=False` — the drift was never persisted. Fixed in
+  3576d5e by computing the latch bit before the ladder.)
+- **Guard predicates that read a column the careless writer never touches.** A DB trigger
+  keyed on `new.<col>` cannot tell "explicitly set" from "inherited from the old row". The
+  `settings` one-way freeze guard rejects `frozen true→false AND new.updated_by IS NULL`, so
+  a bare `update settings set frozen = false` silently *inherits* the previous writer's
+  non-NULL attribution and passes. Whenever a guard's discriminator is an ordinary column,
+  ask "what does the row look like if the statement simply omits it?"
+- **A verdict that must be persisted is only as sticky as the write that persists it.** The
+  branch added to fix a latch fail-open (DRIFT + settings unreadable ⇒ `engage_freeze=True`)
+  is the branch whose DB write is *most likely to fail*, because settings being unreadable
+  usually means the DB is down. Demand: retry-until-persisted, refuse to trade while a
+  freeze is pending, and never let a restart drop the pending flag silently.
 
 Related: [[drift-safety-untested]] — the same diffs often also lack the regression test.
