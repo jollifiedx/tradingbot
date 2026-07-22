@@ -20,6 +20,7 @@ Two layers, per the brief:
 from __future__ import annotations
 
 import dataclasses
+import inspect
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -526,3 +527,26 @@ async def test_engage_system_freeze_wraps_failure_as_database_error() -> None:
     db = Database(_RaisingPool())  # type: ignore[arg-type]
     with pytest.raises(DatabaseError):
         await db.engage_system_freeze()
+
+
+def test_engage_system_freeze_surface_cannot_grow_an_unfreeze() -> None:
+    """A tripwire, not a promise (architect D-4).
+
+    The entire safety claim for this method is "it takes no arguments, so an
+    unfreeze cannot be expressed through it". Nothing enforced that: adding
+    `frozen: bool = True` would quietly turn the worker's one-way valve into a
+    two-way switch. Pin the signature AND the SQL literal, so either change
+    breaks a test and forces a deliberate conversation.
+    """
+    params = inspect.signature(Database.engage_system_freeze).parameters
+    assert set(params) == {"self"}, "engage_system_freeze must take no arguments"
+
+    # Check the CODE, not the docstring -- the docstring legitimately discusses
+    # the unfreeze case it forbids, and matching on it would make this tripwire
+    # fire on documentation changes instead of behaviour changes.
+    source = inspect.getsource(Database.engage_system_freeze)
+    doc = Database.engage_system_freeze.__doc__ or ""
+    body = source.replace(doc, "")
+    assert "frozen = true" in body
+    assert "updated_by = null" in body
+    assert "frozen = false" not in body, "the worker's write path must never unfreeze"

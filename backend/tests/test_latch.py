@@ -266,9 +266,25 @@ def test_trading_is_impossible_whenever_frozen_is_not_exactly_false(
 
 
 def test_only_drift_ever_engages_the_freeze() -> None:
-    for result in (_clean(), _transient(), _not_verified(), None):
-        assert decide_posture(result=result, currently_frozen=False).engage_freeze is False
-    assert decide_posture(result=_drift(), currently_frozen=False).engage_freeze is True
+    """Drift latches; nothing else does -- for EVERY frozen state.
+
+    Architect D-3: this originally only exercised ``currently_frozen=False``,
+    which left a mutant alive -- making the SETTINGS_UNREADABLE branch latch
+    unconditionally kept the whole suite green. That behaviour matters in both
+    directions: a transient DB blip must NOT latch a permanent, owner-clearable
+    freeze, or Esther ends up unfreezing reflexively after every hiccup, which
+    destroys the signal a real drift halt is supposed to carry.
+    """
+    for frozen in (False, True, None):
+        for result in (_clean(), _transient(), _not_verified(), None):
+            decision = decide_posture(result=result, currently_frozen=frozen)
+            assert decision.engage_freeze is False, (
+                f"only drift may latch (result={result}, frozen={frozen})"
+            )
+        assert (
+            decide_posture(result=_drift(), currently_frozen=frozen).engage_freeze
+            is True
+        ), f"drift must latch even when frozen={frozen}"
 
 
 def test_decision_rejects_incoherent_construction() -> None:

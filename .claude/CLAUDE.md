@@ -111,7 +111,17 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   (feeds the gate's seconds_since_tick); (3) first rules-engine strategy + backtest;
   (4) order path that WIRES the safety gate; (5) TOTP 2FA enrollment; (6) deploy (owner-gated).
   GET /positions still DEFERRED (needs worker→DB positions snapshot; Invariant 2).
-- **Known issues / debt:** tests/test_db.py hits the LIVE dev DB — not safe to run concurrently
+- **Known issues / debt:** OPEN owner items from architect review of c5b56c1: (1) CLAUDE.md
+  Invariant 2 still reads "worker reads settings" but the worker now WRITES frozen=true
+  (owner-approved 2026-07-21) — the invariant text needs Esther's wording; (2) TRUNCATE
+  bypasses ALL append-only triggers (`truncate decisions cascade` would erase the Invariant 5
+  audit chain silently) — needs BEFORE TRUNCATE statement triggers on decisions/orders/trades/
+  settings_history, an audit-table change ⇒ owner approval. Freeze-guard limitation (D-2,
+  documented in db.engage_system_freeze): the trigger rejects an unfreeze attributed to NULL,
+  which covers the drift-latch case; a bare hand-written `update settings set frozen=false`
+  after an OWNER freeze inherits her UID and would pass. Not reachable from app code (only two
+  SQL writers). Full closure needs a per-transaction intent token.
+  tests/test_db.py hits the LIVE dev DB — not safe to run concurrently
   (two pytest processes at once cause spurious failures); serialize before CI parallelizes.
   Reconciliation gaps (documented, pre-live): cash leg unverifiable until a DB cash ledger
   exists; open-orders-by-client_order_id leg not built (needs the order path); zero-quantity

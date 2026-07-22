@@ -269,9 +269,19 @@ class Database:
         and a non-NULL value reads as "Esther acted". Attributing a machine halt
         to her would corrupt the audit trail a postmortem depends on.
 
-        Belt and braces: migration ``20260721000001`` installs a trigger that
-        rejects any true->false transition attributed to NULL, so the one-way
-        rule is enforced by the database, not merely by this method's shape.
+        Belt and braces, stated precisely: migration ``20260721000001`` installs
+        a trigger that rejects a true->false transition **attributed to NULL**.
+        Because a bare ``update settings set frozen = false`` inherits the old
+        row's ``updated_by``, the trigger blocks such an update only when the
+        previous writer was the system -- which is exactly the drift-latch case
+        this guard exists for (a system freeze leaves ``updated_by`` NULL, so a
+        later bare unfreeze IS rejected). After an *owner* freeze, a bare
+        hand-written UPDATE would pass. Not reachable from application code:
+        the only two SQL writers to ``settings`` are this method (hardcoded
+        ``frozen = true``) and :meth:`update_settings` (which requires a real
+        ``updated_by`` UUID). The residual exposure is a future hand-written
+        recovery script or migration; closing it fully would need a
+        per-transaction intent token (see architect finding D-2).
 
         Idempotent: freezing an already-frozen bot is a no-op update that still
         returns the current row.
