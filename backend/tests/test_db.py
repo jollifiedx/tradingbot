@@ -462,3 +462,67 @@ async def test_insert_equity_snapshot_wraps_failure_as_database_error() -> None:
             cash_balance=Decimal("1.00"),
             buying_power=Decimal("1.00"),
         )
+
+
+# --------------------------------------------------------------------------
+# engage_system_freeze + the DB-level one-way freeze guard (owner ruling
+# 2026-07-21). All live-DB, inside the rolled-back `tx` transaction.
+# --------------------------------------------------------------------------
+
+
+async def test_engage_system_freeze_sets_frozen_and_attributes_to_null(tx: _Tx) -> None:
+    await tx.conn.execute("update settings set frozen = false where id = true")
+    # Rows written in one transaction share changed_at, so "latest" is
+    # ambiguous -- count the system-attributed rows and assert the delta.
+    system_rows_before = await tx.conn.fetchval(
+        "select count(*) from settings_history where changed_by is null"
+    )
+
+    result = await tx.db.engage_system_freeze()
+
+    assert result.frozen is True
+    # NULL, never the owner's UID: a machine halt must not read as her action.
+    assert result.updated_by is None
+    system_rows_after = await tx.conn.fetchval(
+        "select count(*) from settings_history where changed_by is null"
+    )
+    assert system_rows_after - system_rows_before == 1
+
+
+async def test_system_cannot_unfreeze_db_rejects_it(tx: _Tx) -> None:
+    """The guard is the database's, not the application's.
+
+    Even a direct SQL unfreeze attributed to NULL must be refused -- that is
+    what makes "the worker can lock the door but holds no key" a mechanism
+    rather than a promise.
+    """
+    await tx.db.engage_system_freeze()
+
+    with pytest.raises(asyncpg.PostgresError, match="attributed owner action"):
+        await tx.conn.execute(
+            "update settings set frozen = false, updated_by = null where id = true"
+        )
+
+
+async def test_owner_can_still_unfreeze(tx: _Tx) -> None:
+    """The guard blocks the system, never the owner."""
+    actor = await tx.conn.fetchval("select id from auth.users limit 1")
+    if actor is None:
+        pytest.skip("no auth.users row to attribute an owner action to")
+    await tx.db.engage_system_freeze()
+
+    unfrozen = await tx.db.update_settings(updated_by=actor, frozen=False)
+
+    assert unfrozen.frozen is False
+
+
+async def test_engage_system_freeze_is_idempotent(tx: _Tx) -> None:
+    await tx.db.engage_system_freeze()
+    again = await tx.db.engage_system_freeze()
+    assert again.frozen is True
+
+
+async def test_engage_system_freeze_wraps_failure_as_database_error() -> None:
+    db = Database(_RaisingPool())  # type: ignore[arg-type]
+    with pytest.raises(DatabaseError):
+        await db.engage_system_freeze()

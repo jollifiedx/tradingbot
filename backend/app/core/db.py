@@ -253,6 +253,44 @@ class Database:
 
     # -- writes ---------------------------------------------------------- #
 
+    async def engage_system_freeze(self) -> BotSettings:
+        """Set ``frozen = true`` as the SYSTEM (worker self-halt). One-way.
+
+        Owner ruling 2026-07-21 (docs/decisions.md): the worker may ENGAGE the
+        freeze so a drift halt survives a restart, but may never release it.
+        This method is deliberately narrow -- it takes no arguments and hardcodes
+        ``frozen = true``, so there is no way to express an unfreeze through it,
+        and no caller can pass a value that turns it into one.
+
+        Attribution is NULL, never the owner's UID: ``settings.updated_by`` is a
+        FK to ``auth.users`` and the worker is not a user. NULL is the
+        established convention for a system actor (the seed row uses it), so
+        ``settings_history.changed_by IS NULL`` reads as "the bot halted itself"
+        and a non-NULL value reads as "Esther acted". Attributing a machine halt
+        to her would corrupt the audit trail a postmortem depends on.
+
+        Belt and braces: migration ``20260721000001`` installs a trigger that
+        rejects any true->false transition attributed to NULL, so the one-way
+        rule is enforced by the database, not merely by this method's shape.
+
+        Idempotent: freezing an already-frozen bot is a no-op update that still
+        returns the current row.
+        """
+        try:
+            row = await self._pool.fetchrow(
+                """
+                update settings
+                set frozen = true, updated_at = now(), updated_by = null
+                where id = true
+                returning *
+                """
+            )
+        except _DB_FAILURE_TYPES as exc:
+            raise DatabaseError("failed to engage the system freeze") from exc
+        if row is None:
+            raise DatabaseError("settings singleton row is missing")
+        return BotSettings.model_validate(dict(row))
+
     async def update_settings(
         self,
         *,

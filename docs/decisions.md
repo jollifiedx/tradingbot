@@ -34,6 +34,30 @@ relying on the wiring PR to check `cash_checked` (guarantee lives in caller disc
 exact pattern that produced the finding), and accepting positions-only for paper trading.
 Costs nothing today (no order path exists) and lifts automatically when the cash ledger lands.
 
+## 2026-07-21 — The worker MAY set the freeze flag (one-way), with DB-level guardrails
+
+To survive a restart, a drift halt must persist. The architect flagged that the planned
+mechanism — the worker writing `settings.frozen = true` — needs owner approval: it is on
+CLAUDE.md's "never without explicit owner approval" list, and it inverts Invariant 2's stated
+flow ("UI mutates settings; worker reads settings"). The 2026-07-21 latch ruling said the
+owner *clears* the freeze but never said who *sets* it.
+
+Esther ruled: **the worker may set the freeze flag, one-way, with guardrails.** Invariant 2 is
+amended in exactly one direction: the worker may ENGAGE the freeze, never release it.
+Guardrails, both mechanism not convention:
+1. A DB trigger rejects any `frozen` true→false transition attributed to a NULL (system)
+   actor. The worker's only write path hardcodes `frozen=true, updated_by=NULL`, so the
+   database itself refuses a worker-initiated unfreeze — not just the application code.
+2. System halts are attributed to NULL, never to Esther's UID. `settings.updated_by` is a FK
+   to `auth.users` and the worker is not a user; faking her identity would corrupt
+   `settings_history`, the very record a postmortem depends on. Convention going forward:
+   `changed_by IS NULL` = the bot halted itself, non-NULL = Esther acted.
+
+Rejected: a separate append-only `halts` table (keeps Invariant 2 literally intact, but
+creates a second source of "am I halted?" that the safety gate, API and UI must all learn to
+read — every one that forgets fails open); and app-code convention alone (the caller-discipline
+pattern already rejected on 2026-07-21).
+
 ## 2026-07-21 — Reconciliation halts: real drift is sticky, blips may auto-clear
 
 Invariant 6 says never silently *fix* a mismatch; architect noted that silently *recovering*

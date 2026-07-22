@@ -1,1 +1,2 @@
 - [Recurring drift: safety code without tests](drift_safety_untested.md) — safety-relevant behavior shipped untested; check every diff for it
+- [Recurring drift: guarantees left to caller discipline](drift_caller_discipline.md) — Esther has twice rejected "the wiring PR will do it right"; demand mechanisms
