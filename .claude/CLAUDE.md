@@ -95,13 +95,13 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   DRIFT=sticky/owner-clears, TRANSIENT=may auto-clear, NOT_VERIFIED=resolves structurally.
   db.get_open_position_intents() (long-only, guarded by a no-`side`-column tripwire test).
   260 tests green.
-- **PARKED OWNER DECISION (do not decide by default):** strategy timeframe + holding period.
-  Nothing in the code commits to one yet. Options put to Esther 2026-07-21: intraday/day
-  trading (5–15m bars, flat by close — matches the original vision, but highest cost drag and
-  slowest to validate); swing (daily/hourly bars, hold days–weeks — far less cost drag, easier
-  to prove vs SPY, fits an owner who is at work); or hybrid (daily picks what, intraday refines
-  when). Esther parked it until the scheduler is done; it must be ruled on BEFORE the rules
-  engine is built. Note: bar timeframe and holding period are independent choices.
+- **STRATEGY DECISION — RULED 2026-07-21 (docs/decisions.md):** HYBRID, built SWING-FIRST, as
+  separate STRATEGY MODULES inside ONE worker. Build the swing layer first (daily/hourly bars,
+  hold days–weeks), prove it vs SPY in forward paper, THEN add intraday entry-timing as a
+  self-contained increment. NOT separate bot processes — one account + one set of account-level
+  caps + one reconciliation + one freeze can't be shared by two racing processes. The rules
+  engine is designed for pluggable strategy modules but only the swing module is built first;
+  the safety gate / order path / worker stay strategy-agnostic and shared.
   Halt latch + worker SCHEDULER COMPLETE (4dda1c5, architect-approved after 3 review rounds):
   pure decide_posture(); lifecycle born HALTED→config→settings→reconcile→tick; APScheduler +
   exchange_calendars (sole market-hours authority); posture/reconcile/snapshot jobs. All 11
@@ -111,8 +111,8 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   a clean run; verdicts EXPIRE (2× posture interval) so a starved tick can't keep publishing
   yes; latch defects stick process-lifetime as LATCH_ERROR. 386 tests green.
 - **In progress:** Nothing active. Next: (1) market-data stream + staleness heartbeat (feeds the
-  gate's seconds_since_tick); (2) first rules-engine strategy + backtest — BLOCKED on the parked
-  strategy-timeframe ruling; (3) order path that WIRES the safety gate — its five hard
+  gate's seconds_since_tick); (2) first rules-engine strategy + backtest — the SWING module
+  (strategy ruled 2026-07-21, now UNBLOCKED); (3) order path that WIRES the safety gate — its five hard
   requirements are enumerated in scheduler.py's start() docstring (fresh get_settings per order,
   may_trade at submission, gate wired incl. the loss_so_far sign test, + 2 end-to-end refusal
   tests); (4) TOTP 2FA enrollment; (5) deploy (owner-gated). GET /positions still DEFERRED.

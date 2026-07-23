@@ -34,6 +34,35 @@ relying on the wiring PR to check `cash_checked` (guarantee lives in caller disc
 exact pattern that produced the finding), and accepting positions-only for paper trading.
 Costs nothing today (no order path exists) and lifts automatically when the cash ledger lands.
 
+## 2026-07-21 — Strategy: hybrid, built swing-first, as strategies inside ONE worker
+
+The parked strategy-timeframe decision, now ruled. Esther wants a HYBRID (daily bars pick
+what to hold, intraday bars refine when to enter), but was rightly worried about complexity
+and testing time landing all at once.
+
+Ruling, two parts:
+1. **Incremental, not big-bang.** Build the SWING layer first (daily/hourly bars, hold
+   days–weeks): simpler, fewer trades, far less cost drag, easiest to prove vs SPY, and it
+   fits an owner who is at work all day. Prove it in forward paper trading FIRST. Only then
+   add the intraday entry-timing layer as a separate, self-contained increment. The swing
+   layer is literally the first half of the hybrid — nothing is thrown away. Bar timeframe and
+   holding period remain independent choices within this.
+2. **Separate STRATEGIES, not separate BOTS.** Esther asked about running two worker
+   processes (one swing, one intraday). Rejected: they would share ONE Webull account, one
+   cash pool, and one set of ACCOUNT-LEVEL limits (buy-power cap, daily-loss, per-trade), so
+   two independent processes would race each other on the cap and on order placement, and
+   reconciliation (which assumes ONE writer of intent) could not attribute a shared-symbol
+   position to a bot. It would also duplicate the entire safety spine (scheduler, latch,
+   freeze) — more to test, not less. Instead: ONE worker owns all shared safety-critical
+   machinery (account, caps, reconciliation, order path, the single freeze kill-switch), and
+   the rules engine runs multiple STRATEGY modules (swing now, intraday later) that are each
+   independently testable and all feed orders through the SAME safety gate. One car, one set
+   of brakes, two playbooks — not two drivers on one wheel.
+
+Consequence for the build: the rules engine is designed for pluggable strategy modules from
+the start, but only the swing module is built first. The safety gate / order path / worker are
+strategy-agnostic and shared.
+
 ## 2026-07-21 — The worker MAY set the freeze flag (one-way), with DB-level guardrails
 
 To survive a restart, a drift halt must persist. The architect flagged that the planned
