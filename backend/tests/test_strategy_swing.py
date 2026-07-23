@@ -279,3 +279,57 @@ def test_default_config_is_valid_and_frozen() -> None:
     assert DEFAULT_SWING_CONFIG.stop_loss_pct == Decimal("0.08")
     with pytest.raises((AttributeError, TypeError)):
         DEFAULT_SWING_CONFIG.stop_loss_pct = Decimal("0.05")  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# Malformed-tick rejection at the Bar boundary (architect D1) + the exact
+# stop boundary (architect N1).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "0", "-1"])
+def test_bar_rejects_non_finite_or_non_positive_price(bad: str) -> None:
+    # A malformed tick must be rejected HERE, at construction, so the market-data
+    # adapter can fail closed -- not flow in and make the stop comparison raise.
+    with pytest.raises(ValueError, match="finite, positive"):
+        Bar(
+            timestamp=_T0,
+            open=Decimal(1),
+            high=Decimal(1),
+            low=Decimal(1),
+            close=Decimal(bad),
+            volume=Decimal(1000),
+        )
+
+
+def test_bar_rejects_negative_volume() -> None:
+    with pytest.raises(ValueError, match="volume"):
+        Bar(
+            timestamp=_T0,
+            open=Decimal(1),
+            high=Decimal(1),
+            low=Decimal(1),
+            close=Decimal(1),
+            volume=Decimal(-1),
+        )
+
+
+def test_stop_fires_at_the_exact_boundary() -> None:
+    # entry 100, stop level exactly 92 (8%); close == 92 -> the inclusive stop
+    # (<=) MUST fire. The one control that loses money when wrong gets its exact
+    # equality boundary pinned, not just a strictly-below case.
+    pos = PositionState(symbol="X", quantity=Decimal(5), entry_price=Decimal(100))
+    decision = SwingStrategy().evaluate(
+        market_data=MarketData("X", _bars([100.0] * 259 + [92.0])), position=pos
+    )
+    assert decision.action is StrategyAction.SELL
+    assert "stop_loss" in decision.fired_rules
+
+
+def test_flat_position_conviction_clamps_to_zero() -> None:
+    # A no-entry decision expresses zero confidence (lower clamp), end to end.
+    decision = SwingStrategy().evaluate(
+        market_data=MarketData("X", _bars([300 - 0.5 * i for i in range(260)])),
+        position=PositionState.flat("X"),
+    )
+    assert decision.conviction == Decimal(0)

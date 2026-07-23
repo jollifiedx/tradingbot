@@ -105,6 +105,24 @@ class Bar:
     def __post_init__(self) -> None:
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("Bar.timestamp must be timezone-aware (UTC)")
+        # A non-finite (NaN/Inf) or non-positive price is a malformed tick, NOT
+        # ordinary market data -- reject it here at the boundary (mirroring
+        # PositionState.entry_price's finiteness guard). Otherwise such a value
+        # flows in as data and makes the Decimal stop-loss comparison raise
+        # `decimal.InvalidOperation` on a held position -- skipping the stop
+        # exactly when a bad tick arrives. Failing here instead lets the
+        # market-data-stream adapter catch it and halt/stale (fail closed), and
+        # keeps `Strategy.evaluate` total on WELL-FORMED market data.
+        for name, price in (
+            ("open", self.open),
+            ("high", self.high),
+            ("low", self.low),
+            ("close", self.close),
+        ):
+            if not price.is_finite() or price <= 0:
+                raise ValueError(f"Bar.{name} must be a finite, positive Decimal")
+        if not self.volume.is_finite() or self.volume < 0:
+            raise ValueError("Bar.volume must be a finite, non-negative Decimal")
 
 
 @dataclass(frozen=True, slots=True)

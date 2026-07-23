@@ -232,7 +232,9 @@ class SwingStrategy(Strategy):
         indic = self._compute_indicators(market_data)
 
         if position.is_open:
-            return self._evaluate_exit(market_data.symbol, position, indic, as_of)
+            return self._evaluate_exit(
+                market_data.symbol, position, indic, latest.close, as_of
+            )
         return self._evaluate_entry(market_data.symbol, indic, as_of)
 
     def _evaluate_exit(
@@ -240,6 +242,7 @@ class SwingStrategy(Strategy):
         symbol: str,
         position: PositionState,
         indic: _Indicators,
+        close: Decimal,
         as_of: datetime,
     ) -> StrategyDecision:
         """Holding: SELL on stop-loss or trend break, else HOLD.
@@ -247,11 +250,14 @@ class SwingStrategy(Strategy):
         The stop is evaluated FIRST and in Decimal, on price alone, so it protects
         capital even when indicators could not be computed. ``entry_price`` is
         guaranteed present for an open position (PositionState enforces it).
+
+        ``close`` is the bar's NATIVE Decimal close (not the float indicator
+        value): the one risk-defining comparison must never round-trip the money
+        path through float.
         """
         cfg = self.config
         entry = position.entry_price
         assert entry is not None  # guaranteed by PositionState for an open position
-        close = Decimal(str(indic.close))
         stop_level = entry * (Decimal(1) - cfg.stop_loss_pct)
         stop_hit = close <= stop_level
 
