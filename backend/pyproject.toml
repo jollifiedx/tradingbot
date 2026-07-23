@@ -77,6 +77,15 @@ ignore_missing_imports = true
 module = ["apscheduler.*", "exchange_calendars.*"]
 ignore_missing_imports = true
 
+# The trading numerics stack (pandas-ta, vectorbt) ships no py.typed markers or
+# stubs. Scoped the same way as the boundaries above rather than relaxing strict
+# mode globally: all access is confined to app/worker/strategy/{swing,backtest}.py,
+# and every value that leaves those libraries is converted at the boundary (float
+# -> Decimal via str for money; NaN/None guarded) before it informs a decision.
+[[tool.mypy.overrides]]
+module = ["pandas.*", "pandas_ta.*", "vectorbt.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
