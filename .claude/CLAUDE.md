@@ -110,13 +110,16 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   self-freezes via engage_system_freeze; freeze_write_pending debt retried and never cleared by
   a clean run; verdicts EXPIRE (2× posture interval) so a starved tick can't keep publishing
   yes; latch defects stick process-lifetime as LATCH_ERROR. 386 tests green.
-  Rules engine COMPLETE (13818dc, architect review in flight): pluggable Strategy ABC
-  (base.py) + swing_trend_v1 (swing.py — daily-bar trend follower, long-only, draft 8% stop +
-  trend-break exit, signals only, never sizes) + vectorbt backtest harness (backtest.py — no
-  look-ahead walk, costs always applied, SPY benchmark, "backtest≠validation" disclaimer).
-  Pure, wired to NOTHING. DRAFT risk params isolated in SwingConfig — OWNER MUST REVIEW before
-  they inform real sizing. 445 tests green. (Main session wrote test_strategy_swing/backtest.py
-  after the build agent stalled twice — flagged to architect as unreviewed authorship.)
+  Rules engine COMPLETE + architect-reviewed (6bdf3ab): pluggable Strategy ABC (base.py) +
+  swing_trend_v1 (swing.py — daily-bar trend follower, long-only, draft 8% stop + trend-break
+  exit, signals only, never sizes) + vectorbt backtest harness (backtest.py — no look-ahead
+  walk, costs always applied, SPY benchmark, "backtest≠validation" disclaimer). Pure, wired to
+  NOTHING. Review found D1/D2 (a non-finite/non-positive price bar slipped Bar construction and
+  made the Decimal stop RAISE on a held position, skipping the stop — same NaN-boundary shape as
+  before) — FIXED: Bar rejects malformed OHLC/volume at construction; stop compares native
+  Decimal close. 453 tests green. Re-review of the small D1/D2 fix is PENDING (non-blocking —
+  nothing consumes evaluate() yet; the order path that will is owner-gated). DRAFT risk params
+  in SwingConfig still need OWNER REVIEW before real sizing.
 - **In progress:** Nothing active. Next: (1) market-data stream + staleness heartbeat (feeds the
   gate's seconds_since_tick); (2) order path that WIRES the safety gate + strategy — its five hard
   requirements are enumerated in scheduler.py's start() docstring (fresh get_settings per order,
