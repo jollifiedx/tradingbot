@@ -110,12 +110,20 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   self-freezes via engage_system_freeze; freeze_write_pending debt retried and never cleared by
   a clean run; verdicts EXPIRE (2× posture interval) so a starved tick can't keep publishing
   yes; latch defects stick process-lifetime as LATCH_ERROR. 386 tests green.
+  Rules engine COMPLETE (13818dc, architect review in flight): pluggable Strategy ABC
+  (base.py) + swing_trend_v1 (swing.py — daily-bar trend follower, long-only, draft 8% stop +
+  trend-break exit, signals only, never sizes) + vectorbt backtest harness (backtest.py — no
+  look-ahead walk, costs always applied, SPY benchmark, "backtest≠validation" disclaimer).
+  Pure, wired to NOTHING. DRAFT risk params isolated in SwingConfig — OWNER MUST REVIEW before
+  they inform real sizing. 445 tests green. (Main session wrote test_strategy_swing/backtest.py
+  after the build agent stalled twice — flagged to architect as unreviewed authorship.)
 - **In progress:** Nothing active. Next: (1) market-data stream + staleness heartbeat (feeds the
-  gate's seconds_since_tick); (2) first rules-engine strategy + backtest — the SWING module
-  (strategy ruled 2026-07-21, now UNBLOCKED); (3) order path that WIRES the safety gate — its five hard
+  gate's seconds_since_tick); (2) order path that WIRES the safety gate + strategy — its five hard
   requirements are enumerated in scheduler.py's start() docstring (fresh get_settings per order,
   may_trade at submission, gate wired incl. the loss_so_far sign test, + 2 end-to-end refusal
-  tests); (4) TOTP 2FA enrollment; (5) deploy (owner-gated). GET /positions still DEFERRED.
+  tests); (3) TOTP 2FA enrollment; (4) deploy (owner-gated). GET /positions still DEFERRED.
+  OWNER TODO: review the DRAFT SwingConfig risk params (stop_loss_pct=8%, MA lengths, RSI
+  ceiling) + the backtest CostModel assumptions before any real sizing.
   NOTE: may_trade is permanently False today and that is CORRECT — it needs cash_checked, which
   needs a DB cash ledger, which the order path brings. Do not "fix" it to look healthy.
 - **Known issues / debt:** OPEN owner items from architect review of c5b56c1: (1) CLAUDE.md
