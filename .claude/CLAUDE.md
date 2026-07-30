@@ -117,16 +117,25 @@ app/research/→research-engineer · frontend/→frontend-engineer · .github//i
   NOTHING. Review found D1/D2 (a non-finite/non-positive price bar slipped Bar construction and
   made the Decimal stop RAISE on a held position, skipping the stop — same NaN-boundary shape as
   before) — FIXED: Bar rejects malformed OHLC/volume at construction; stop compares native
-  Decimal close. 453 tests green. Re-review of the small D1/D2 fix is PENDING (non-blocking —
-  nothing consumes evaluate() yet; the order path that will is owner-gated). DRAFT risk params
-  in SwingConfig still need OWNER REVIEW before real sizing.
-- **In progress:** Nothing active. Next: (1) market-data stream + staleness heartbeat (feeds the
-  gate's seconds_since_tick); (2) order path that WIRES the safety gate + strategy — its five hard
-  requirements are enumerated in scheduler.py's start() docstring (fresh get_settings per order,
-  may_trade at submission, gate wired incl. the loss_so_far sign test, + 2 end-to-end refusal
-  tests); (3) TOTP 2FA enrollment; (4) deploy (owner-gated). GET /positions still DEFERRED.
-  OWNER TODO: review the DRAFT SwingConfig risk params (stop_loss_pct=8%, MA lengths, RSI
-  ceiling) + the backtest CostModel assumptions before any real sizing.
+  Decimal close. 453 tests green. DRAFT risk params in SwingConfig still need OWNER REVIEW.
+  OBSERVE MODE COMPLETE + architect-approved (8218345): worker evaluates a fixed manual
+  watchlist (AAPL/MSFT/SPY) on real daily bars and APPENDS decisions to the append-only
+  decisions table — places NO orders (structurally: read-only BarSource + append-only
+  DecisionSink, concrete WebullClient/Database have no order method). db.insert_decision
+  (INSERT-only, NULL llm_rationale/thesis_id/settings_snapshot). Daily post-close cron job
+  (22:00 UTC weekdays, holiday-gated), outside the trading CLEAR gate. Ran live: AAPL→BUY
+  conviction 0.448 recorded to dev decisions (sandbox serves AAPL bars only; MSFT/SPY skipped —
+  env limit). 473 tests green. This is the "watch the bot think" milestone — first thing the
+  owner can actually test.
+- **In progress:** Nothing active. Next: (1) order path that WIRES the safety gate + strategy —
+  THE big owner-gated one; its five hard requirements are in scheduler.py's start() docstring
+  (fresh get_settings per order, may_trade at submission, gate wired incl. loss_so_far sign
+  test, + 2 refusal tests); it must also populate decisions.settings_snapshot so order-path rows
+  stay distinguishable from observe rows (NULL snapshot = observe). (2) market-data stream +
+  staleness heartbeat (feeds the gate's seconds_since_tick — needed for intraday, not the daily
+  swing observe). (3) TOTP 2FA enrollment; (4) deploy (owner-gated). GET /positions DEFERRED.
+  OWNER TODO before any real sizing: review DRAFT SwingConfig risk params (stop_loss_pct=8%, MA
+  lengths, RSI ceiling) + the backtest CostModel assumptions.
   NOTE: may_trade is permanently False today and that is CORRECT — it needs cash_checked, which
   needs a DB cash ledger, which the order path brings. Do not "fix" it to look healthy.
 - **Known issues / debt:** OPEN owner items from architect review of c5b56c1: (1) CLAUDE.md
