@@ -13,8 +13,11 @@ Lifecycle contract (see the scheduler module docstring for the full rules):
    hand-rolled -- and only register trading jobs if that startup tick came back
    CLEAR.
 
-No trading logic exists yet: there is no rules engine and no order path, so the
-scheduler runs reconciliation, the posture tick, and the daily equity snapshot.
+No order path exists yet. The scheduler runs reconciliation, the posture tick,
+the daily equity snapshot, and OBSERVE MODE -- the last evaluates a fixed
+watchlist on real daily bars and records the rules engine's decisions to the
+append-only `decisions` log, placing NO order (invariants #1/#5). Observing is
+the safe precursor to wiring the audited order path.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from app.core.config import load_settings
 from app.core.db import Database
 from app.core.webull import WebullClient
 from app.worker.market_hours import MarketClock
+from app.worker.observe import observe_watchlist
 from app.worker.reconciliation import reconcile
 from app.worker.scheduler import Worker
 from app.worker.snapshot import take_snapshot
@@ -48,6 +52,9 @@ async def run_worker() -> None:
             snapshot_fn=partial(
                 take_snapshot, settings=settings, client=client, db=db
             ),
+            # OBSERVE MODE: record the watchlist's decisions daily. Read-only
+            # client + append-only decisions insert -- no order path.
+            observe_fn=partial(observe_watchlist, client=client, db=db),
             market_clock=MarketClock(),
         )
         await worker.run()

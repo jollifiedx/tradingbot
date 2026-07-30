@@ -41,7 +41,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import asyncpg
@@ -300,6 +300,64 @@ class Database:
         if row is None:
             raise DatabaseError("settings singleton row is missing")
         return BotSettings.model_validate(dict(row))
+
+    async def insert_decision(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        conviction: Decimal | None,
+        rules_fired: list[Any] | dict[str, Any],
+        market_data_as_of: datetime | None,
+    ) -> Decision:
+        """Append ONE row to the `decisions` audit log. INSERT only, never mutate.
+
+        This is how OBSERVE MODE (and, later, the order path) records what the
+        deterministic rules engine decided -- including deliberate NO-trades
+        (CLAUDE.md invariant #5: `decisions` is append-only; a correction is a
+        new row, never an UPDATE/DELETE -- the table's triggers reject those for
+        every role, so this method is the ONLY write shape there is).
+
+        The five arguments are exactly
+        :meth:`StrategyDecision.as_decision_fields` (`symbol`, `action`,
+        `conviction`, `rules_fired`, `market_data_as_of`). Three columns are set
+        NULL on purpose:
+
+        - `llm_rationale` -- a strategy's rationale is a DETERMINISTIC record of
+          which rules fired, not an LLM's free text; the deterministic detail
+          already lives inside `rules_fired`. Storing it as `llm_rationale`
+          would misattribute machine logic to the research model (invariant #1).
+        - `thesis_id` -- no LLM thesis informs a purely-deterministic decision.
+        - `settings_snapshot` -- OBSERVE MODE places no order, so there is no
+          order-time constraint set to snapshot; the order path fills this in
+          when it lands.
+
+        `rules_fired` is written to the jsonb column via the pool's registered
+        json codec. `conviction` is a `Decimal` (or None) bound straight to the
+        `numeric(4,3)` column -- no float ever touches it. Fails closed: any
+        connectivity/query failure (or a check-constraint violation, e.g. an
+        out-of-range action) raises :class:`DatabaseError`; the caller must not
+        treat that as "recorded".
+        """
+        try:
+            row = await self._pool.fetchrow(
+                """
+                insert into decisions
+                    (symbol, action, conviction, rules_fired, market_data_as_of)
+                values ($1, $2, $3, $4, $5)
+                returning *
+                """,
+                symbol,
+                action,
+                conviction,
+                rules_fired,
+                market_data_as_of,
+            )
+        except _DB_FAILURE_TYPES as exc:
+            raise DatabaseError("failed to insert decision") from exc
+        if row is None:
+            raise DatabaseError("decision insert returned no row")
+        return Decision.model_validate(dict(row))
 
     async def update_settings(
         self,

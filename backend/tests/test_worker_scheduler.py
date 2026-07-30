@@ -43,6 +43,7 @@ from app.worker.scheduler import (
     HALT_REASON_LATCH_ERROR,
     HALT_REASON_SETTINGS_UNREADABLE,
     JOB_EQUITY_SNAPSHOT,
+    JOB_OBSERVE,
     JOB_POSTURE,
     JOB_RECONCILE,
     SchedulerConfig,
@@ -149,6 +150,24 @@ class FakeSnapshot:
         return object()
 
 
+class FakeObserve:
+    """An injectable stand-in for the OBSERVE MODE collaborator.
+
+    It is an opaque zero-arg coroutine to the worker, exactly as the real
+    `partial(observe_watchlist, ...)` is -- and, like it, exposes no order method.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.error: Exception | None = None
+
+    async def __call__(self) -> object:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return object()
+
+
 class FakeMarketCalendar:
     """Market hours under test control. The real calendar has its own suite."""
 
@@ -240,6 +259,7 @@ def _build(
     *,
     reconciler: FakeReconciler | None = None,
     snapshot: FakeSnapshot | None = None,
+    observe: FakeObserve | None = None,
     market: FakeMarketCalendar | None = None,
     clock: FakeClock | None = None,
     config: SchedulerConfig | None = None,
@@ -251,6 +271,7 @@ def _build(
         db=store,
         reconcile_fn=reconciler,
         snapshot_fn=snapshot if snapshot is not None else FakeSnapshot(),
+        observe_fn=observe,
         market_clock=market if market is not None else FakeMarketCalendar(),
         config=config if config is not None else SchedulerConfig(),
         now_fn=clock,
@@ -1347,3 +1368,91 @@ async def test_a_naive_clock_is_never_treated_as_fresh() -> None:
     naive = datetime(2026, 7, 21, 15, 0)  # noqa: DTZ001 -- the case under test
 
     assert worker.state.fresh_result(naive) is None, "a naive clock is not evidence"
+
+
+# ==========================================================================
+# OBSERVE MODE job wiring. Observing records decisions; it never trades, so it
+# is not behind the startup CLEAR gate and it ignores freeze/posture entirely.
+# ==========================================================================
+
+
+def _session_today() -> FakeMarketCalendar:
+    """A calendar whose last close is on T0's UTC date (a session closed today)."""
+    return FakeMarketCalendar(close=datetime(2026, 7, 21, 20, 0, tzinfo=UTC))
+
+
+def test_observe_job_registered_only_when_a_collaborator_is_injected() -> None:
+    without, *_ = _build()
+    assert JOB_OBSERVE not in {j.id for j in without.build_scheduler().get_jobs()}
+
+    with_observe, *_ = _build(observe=FakeObserve())
+    assert JOB_OBSERVE in {j.id for j in with_observe.build_scheduler().get_jobs()}
+
+
+async def test_observe_job_runs_even_while_halted() -> None:
+    """OBSERVE MODE ignores posture: it runs when the bot is frozen and halted.
+
+    Observing places no order, so a freeze must not suppress it -- the owner
+    still wants to see what the strategy would have decided.
+    """
+    observe = FakeObserve()
+    worker, _store, _rec, _ = _build(
+        store=FakeSettingsStore(frozen=True),
+        observe=observe,
+        market=_session_today(),
+    )
+    assert worker.state.may_trade is False
+    await worker.observe_job()
+    assert observe.calls == 1
+
+
+async def test_observe_job_skipped_on_a_non_session_day() -> None:
+    """No session closed today (holiday/weekend) -> no observation recorded.
+
+    The append-only decisions log must not be padded with duplicate rows for a
+    day the market never opened -- and those rows can never be deleted.
+    """
+    observe = FakeObserve()
+    # previous_close is None -> the calendar cannot confirm a session today.
+    worker, *_ = _build(observe=observe, market=FakeMarketCalendar(close=None))
+    await worker.observe_job()
+    assert observe.calls == 0
+
+
+async def test_observe_job_never_raises_on_a_failure() -> None:
+    """A failure in the observe collaborator must not take the process down."""
+    observe = FakeObserve()
+    observe.error = RuntimeError("observe blew up")
+    worker, *_ = _build(observe=observe, market=_session_today())
+
+    with capture_logs() as logs:
+        await worker.observe_job()  # must not raise
+
+    assert observe.calls == 1
+    assert any(entry["event"] == "worker.observe_failed" for entry in logs)
+
+
+async def test_observe_job_is_a_noop_when_not_configured() -> None:
+    """No collaborator injected -> the job is inert (and still never raises)."""
+    worker, *_ = _build(market=_session_today())
+    await worker.observe_job()  # no observe_fn; nothing happens
+
+
+async def test_observe_is_scheduled_even_when_startup_posture_is_halted() -> None:
+    """Observe is NOT a trading job: it is registered regardless of the CLEAR gate.
+
+    Today's real posture is a permanent halt (no cash ledger), so no trading job
+    is registered -- but the observe job still is.
+    """
+    observe = FakeObserve()
+    worker, _store, reconciler, _ = _build(
+        observe=observe, market=_session_today()
+    )
+    reconciler.result = _cash_not_verified()  # the real, permanently-halted posture
+    scheduler = await worker.start()
+    try:
+        assert worker.state.may_trade is False
+        assert worker.trading_jobs_registered is False
+        assert JOB_OBSERVE in {j.id for j in scheduler.get_jobs()}
+    finally:
+        scheduler.shutdown(wait=False)

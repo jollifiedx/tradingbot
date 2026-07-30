@@ -32,7 +32,7 @@ import pytest
 
 from app.core.config import load_settings
 from app.core.db import Database, DatabaseError, _register_codecs
-from app.core.models import BotSettings, Decision, EquitySnapshot
+from app.core.models import BotSettings, Decision, DecisionAction, EquitySnapshot
 
 # --------------------------------------------------------------------------
 # Live dev-DB fixture: one connection, one uncommitted transaction per test.
@@ -222,6 +222,97 @@ async def test_update_settings_updates_given_fields_and_logs_history(tx: _Tx) ->
 async def test_update_settings_requires_at_least_one_field(tx: _Tx) -> None:
     with pytest.raises(ValueError, match="at least one field"):
         await tx.db.update_settings(updated_by=uuid4())
+
+
+# --------------------------------------------------------------------------
+# insert_decision (OBSERVE MODE / order-path audit write, invariant #5)
+# --------------------------------------------------------------------------
+
+
+async def test_insert_decision_round_trips_as_decision_fields(tx: _Tx) -> None:
+    """A StrategyDecision's as_decision_fields() lands as one decisions row.
+
+    Uses the real strategy output shape (via as_decision_fields), inside the
+    rolled-back tx so the append-only table is never actually mutated in dev.
+    """
+    from app.worker.strategy.base import (
+        RuleResult,
+        StrategyAction,
+        StrategyDecision,
+    )
+
+    as_of = datetime(2099, 3, 2, tzinfo=UTC)
+    decision = StrategyDecision(
+        symbol="ZTEST_OBSERVE",
+        action=StrategyAction.NO_TRADE,
+        conviction=Decimal("0.250"),
+        rationale="deterministic; not an LLM rationale",
+        rules=(
+            RuleResult(name="trend_up", fired=False, detail="below trend SMA"),
+            RuleResult(name="momentum_up", fired=True, detail="fast>slow"),
+        ),
+        as_of=as_of,
+    )
+    fields = decision.as_decision_fields()
+
+    stored = await tx.db.insert_decision(
+        symbol=fields["symbol"],  # type: ignore[arg-type]
+        action=fields["action"],  # type: ignore[arg-type]
+        conviction=fields["conviction"],  # type: ignore[arg-type]
+        rules_fired=fields["rules_fired"],  # type: ignore[arg-type]
+        market_data_as_of=fields["market_data_as_of"],  # type: ignore[arg-type]
+    )
+
+    assert isinstance(stored, Decision)
+    assert stored.symbol == "ZTEST_OBSERVE"
+    assert stored.action == DecisionAction.NO_TRADE
+    assert stored.conviction == Decimal("0.250")
+    assert stored.market_data_as_of == as_of
+    # rules_fired round-trips as the FULL ruleset (jsonb), fired flags intact.
+    assert stored.rules_fired == [
+        {"name": "trend_up", "fired": False, "detail": "below trend SMA"},
+        {"name": "momentum_up", "fired": True, "detail": "fast>slow"},
+    ]
+    # OBSERVE MODE never attributes deterministic logic to the LLM, links no
+    # thesis, and snapshots no order-time settings.
+    assert stored.llm_rationale is None
+    assert stored.thesis_id is None
+    assert stored.settings_snapshot is None
+    assert stored.decided_at.tzinfo is not None  # timestamptz -> UTC-aware
+
+    # It really is in the table (within this uncommitted tx).
+    count = await tx.conn.fetchval(
+        "select count(*) from decisions where id = $1", stored.id
+    )
+    assert count == 1
+
+
+async def test_insert_decision_accepts_null_conviction_and_as_of(tx: _Tx) -> None:
+    stored = await tx.db.insert_decision(
+        symbol="ZTEST_NULLS",
+        action="hold",
+        conviction=None,
+        rules_fired=[],
+        market_data_as_of=None,
+    )
+    assert stored.conviction is None
+    assert stored.market_data_as_of is None
+    assert stored.rules_fired == []
+
+
+async def test_insert_decision_rejects_out_of_range_action_fails_closed(
+    tx: _Tx,
+) -> None:
+    # The check constraint (buy|sell|hold|no_trade) must surface as DatabaseError,
+    # never a silently-written bad row.
+    with pytest.raises(DatabaseError):
+        await tx.db.insert_decision(
+            symbol="ZTEST_BAD",
+            action="teleport",
+            conviction=None,
+            rules_fired=[],
+            market_data_as_of=None,
+        )
 
 
 # --------------------------------------------------------------------------

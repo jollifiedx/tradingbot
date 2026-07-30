@@ -4,3 +4,4 @@
 - [Drift: stale cached verdict](drift_stale_verdict.md) — inputs age out but the published permission does not; check what happens when the refresher stops.
 - [Reviewing AST tripwire tests](review_ast_tripwires.md) — run the test's own predicate against bypass shapes before crediting it as a guard.
 - [Re-reviewing a fix that was a rewrite](review_fix_rewrites.md) — untested guards vanish silently; docstrings describe refactors that were abandoned.
+- [Observe mode shares the decisions audit table](review_observe_shared_audit_table.md) — observe & future order-path decisions differ only by settings_snapshot IS NULL; check at order-path review.

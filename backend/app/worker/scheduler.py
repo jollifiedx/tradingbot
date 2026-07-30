@@ -92,8 +92,13 @@ KNOWN RESIDUAL HOLES (written down deliberately, not discovered later)
   not "fix" it to make a run look healthy -- it lifts on its own when the order
   path lands a cash ledger.
 
-What this module deliberately does NOT contain: a trading loop, an order path,
-a strategy, or any market-data subscription. None of those exist yet.
+What this module deliberately does NOT contain: a trading loop or an order path.
+Neither exists yet. It DOES schedule an optional OBSERVE MODE job, but only as an
+injected, opaque coroutine (:attr:`Worker._observe`) that records decisions to
+the append-only `decisions` log -- the strategy, the market-data reads and the DB
+write all live behind that collaborator (:mod:`app.worker.observe`), never here,
+and it exposes no way to place an order. Observing is not trading, so that job is
+not behind the startup CLEAR gate.
 """
 
 from __future__ import annotations
@@ -104,6 +109,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.worker.latch import LatchDecision, LatchReason, decide_posture
@@ -146,6 +152,7 @@ _HALT_REASON_BY_LATCH_REASON: dict[LatchReason, str | None] = {
 JOB_POSTURE = "posture"
 JOB_RECONCILE = "reconcile"
 JOB_EQUITY_SNAPSHOT = "equity_snapshot"
+JOB_OBSERVE = "observe"
 
 
 class SettingsStore(Protocol):
@@ -195,6 +202,9 @@ class SchedulerConfig:
         "freeze_write_attempts",
         "freeze_write_backoff_seconds",
         "misfire_grace_seconds",
+        "observe_hour_utc",
+        "observe_minute_utc",
+        "observe_misfire_grace_seconds",
         "posture_interval_seconds",
         "reconcile_interval_seconds",
         "snapshot_check_interval_seconds",
@@ -211,6 +221,9 @@ class SchedulerConfig:
         misfire_grace_seconds: int = 30,
         freeze_write_attempts: int = 5,
         freeze_write_backoff_seconds: float = 1.0,
+        observe_hour_utc: int = 22,
+        observe_minute_utc: int = 0,
+        observe_misfire_grace_seconds: int = 3600,
     ) -> None:
         values = {
             "posture_interval_seconds": posture_interval_seconds,
@@ -219,12 +232,19 @@ class SchedulerConfig:
             "snapshot_delay_after_close_seconds": snapshot_delay_after_close_seconds,
             "misfire_grace_seconds": misfire_grace_seconds,
             "freeze_write_attempts": freeze_write_attempts,
+            "observe_misfire_grace_seconds": observe_misfire_grace_seconds,
         }
         for name, value in values.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
         if freeze_write_backoff_seconds < 0:
             raise ValueError("freeze_write_backoff_seconds must be non-negative")
+        # Time-of-day (0 is a valid hour/minute, so these are bounded, not
+        # "positive"). The observe job runs once daily after the US close.
+        if not 0 <= observe_hour_utc <= 23:
+            raise ValueError("observe_hour_utc must be in [0, 23]")
+        if not 0 <= observe_minute_utc <= 59:
+            raise ValueError("observe_minute_utc must be in [0, 59]")
         self.posture_interval_seconds = posture_interval_seconds
         self.reconcile_interval_seconds = reconcile_interval_seconds
         self.snapshot_check_interval_seconds = snapshot_check_interval_seconds
@@ -232,6 +252,9 @@ class SchedulerConfig:
         self.misfire_grace_seconds = misfire_grace_seconds
         self.freeze_write_attempts = freeze_write_attempts
         self.freeze_write_backoff_seconds = freeze_write_backoff_seconds
+        self.observe_hour_utc = observe_hour_utc
+        self.observe_minute_utc = observe_minute_utc
+        self.observe_misfire_grace_seconds = observe_misfire_grace_seconds
 
     @property
     def result_max_age(self) -> timedelta:
@@ -476,6 +499,7 @@ class Worker:
         db: SettingsStore,
         reconcile_fn: Callable[[], Awaitable[ReconciliationResult]],
         snapshot_fn: Callable[[], Awaitable[object]],
+        observe_fn: Callable[[], Awaitable[object]] | None = None,
         market_clock: MarketCalendar | None = None,
         config: SchedulerConfig | None = None,
         now_fn: Callable[[], datetime] | None = None,
@@ -484,6 +508,12 @@ class Worker:
         self._db = db
         self._reconcile = reconcile_fn
         self._snapshot = snapshot_fn
+        # OBSERVE MODE (optional): an injected coroutine that records the
+        # watchlist's decisions. Opaque to the worker -- it is not the money
+        # path, touches no WorkerState, and (like every collaborator here)
+        # exposes no way to place an order. None => the observe job is not
+        # scheduled at all.
+        self._observe = observe_fn
         self._market = market_clock if market_clock is not None else MarketClock()
         self._config = config if config is not None else SchedulerConfig()
         self._now = now_fn if now_fn is not None else _utc_now
@@ -616,6 +646,28 @@ class Worker:
             coalesce=True,
             misfire_grace_time=grace,
         )
+        # OBSERVE MODE: once daily on weekdays, after the US close, IF an observe
+        # collaborator was injected. It is NOT a trading job and NOT behind the
+        # startup CLEAR gate -- observing is always safe (it records decisions;
+        # it cannot place an order). A holiday is filtered inside the job via the
+        # market calendar; the weekday cron only removes weekends. Its misfire
+        # grace is generous on purpose: unlike posture/reconcile -- where a
+        # missed run must age out into a halt -- a late observation is harmless
+        # and better run than dropped, so a brief delay does not skip the day.
+        if self._observe is not None:
+            scheduler.add_job(
+                self.observe_job,
+                CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=self._config.observe_hour_utc,
+                    minute=self._config.observe_minute_utc,
+                    timezone="UTC",
+                ),
+                id=JOB_OBSERVE,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=self._config.observe_misfire_grace_seconds,
+            )
         return scheduler
 
     def _register_trading_jobs(self, scheduler: AsyncIOScheduler) -> None:
@@ -772,6 +824,53 @@ class Worker:
             return
         self._last_snapshot_close = close
         log.info("worker.snapshot_taken", session_close=close.isoformat())
+
+    async def observe_job(self) -> None:
+        """OBSERVE MODE: record the watchlist's decisions. Places NO order.
+
+        Runs regardless of freeze/posture -- observing is always safe: it reads
+        market data and appends decision rows, and it has no order method to
+        call. That is why it is not behind the startup CLEAR gate.
+
+        Deliberately does NOT take the state lock. It touches no
+        :class:`WorkerState`, so serialising it with the posture tick would only
+        let a slow network round-trip stall the safety loop -- the exact opposite
+        of what the lock is for.
+
+        A holiday is skipped via the SOLE market-hours authority (the calendar),
+        so the append-only `decisions` log is not padded with duplicate rows for
+        a day the market never opened -- those rows can never be deleted
+        (invariant #5). Never raises: a failure here must not take the process
+        down (it is not the money path); the injected collaborator already
+        isolates per-symbol failures, and this is defence in depth.
+        """
+        observe = self._observe
+        if observe is None:
+            return
+        now = self._now()
+        if not self._market_had_session_today(now):
+            log.debug(
+                "worker.observe_skipped",
+                detail="no market session closed today per calendar",
+            )
+            return
+        try:
+            await observe()
+        except Exception as exc:
+            log.error("worker.observe_failed", error_type=type(exc).__name__)
+
+    def _market_had_session_today(self, now: datetime) -> bool:
+        """True iff a market session has already CLOSED on ``now``'s UTC date.
+
+        The observe job fires after the US close; on a trading day the most
+        recent close therefore falls on today's UTC date, and on a weekend or
+        holiday it falls on an earlier day. Fail closed: an unanswerable calendar
+        (``None``) reads as "no session", so the job simply does not run.
+        """
+        close = self._market.previous_close(now)
+        if close is None:
+            return False
+        return close.date() == now.date()
 
     # -- settings + freeze -------------------------------------------------- #
 
